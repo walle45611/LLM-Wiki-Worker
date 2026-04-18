@@ -7,7 +7,7 @@
         "binding": "AI",
     },
     "observability": {
-        "enabled": false,
+        "enabled": true,
         "head_sampling_rate": 1,
         "logs": {
             "enabled": true,
@@ -27,6 +27,8 @@
         "GITHUB_REPO": "LLM-Wiki",
         "GITHUB_REF": "main",
         "GITHUB_FILE_PATH": "wiki/log.md",
+        "GITHUB_INDEX_PATH": "wiki/index.md",
+        "GITHUB_REVIEW_RULES_PATH": "wiki/rules/review-rules.md",
         "AI_MODEL": "@cf/openai/gpt-oss-120b",
     },
 }

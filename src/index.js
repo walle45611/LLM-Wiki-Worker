@@ -1,28 +1,67 @@
 import { Hono } from "hono";
 import {
-    buildDateResolutionAssistantPrompt,
-    buildDateResolutionSystemPrompt,
-    buildDateResolutionUserPrompt,
-    buildSummarySystemPrompt,
+    buildIntentRouterSystemPrompt,
+    buildIntentRouterUserPrompt,
+    buildSummaryReplyAssistantPrompt,
+    buildSummaryLookupAssistantPrompt,
+    buildSummaryLookupUserPrompt,
     buildSummaryUserPrompt,
 } from "./prompts.js";
+import {
+    buildDateVariants,
+    extractLogForDate,
+    extractSummaryReferencesFromLog,
+    fetchSummaryFiles,
+    normalizeWikiPath,
+    parseSummaryIndex,
+    parseSummaryIndexEntries,
+    resolveSummaryPathsForDate,
+} from "./knowledge.js";
+import { logError, logInfo, logWarn, toPreview } from "./logger.js";
+import {
+    buildAssistantToolCallMessage,
+    buildReadingFlowTools,
+    executeSummaryToolCall,
+    extractToolCalls,
+    getToolCallId,
+    getToolCallName,
+    parseToolCallArguments,
+} from "./ai/tools.js";
+import {
+    buildIntentRouterResponseFormat,
+    buildSummaryLookupResponseFormat,
+    buildSummaryReplyResponseFormat,
+} from "./ai/format.js";
+import { extractAiText, extractSummaryReplyFromResult } from "./ai/response.js";
+import {
+    buildAiInputLog,
+    runAiTextGeneration,
+    toPreviewWithLimit,
+} from "./ai/runner.js";
+import { fetchGithubFile } from "./github/client.js";
 
 const LINE_REPLY_ENDPOINT = "https://api.line.me/v2/bot/message/reply";
-const GITHUB_API_BASE = "https://api.github.com";
+const AGENTS_PATH = "AGENTS.md";
+const DEFAULT_MAX_TOKENS = 4096;
+
+export { extractAiText, extractSummaryReplyFromResult, fetchGithubFile };
 
 export const app = new Hono();
 
 app.onError((error) => {
-    console.error("Unhandled worker error", error);
+    logError("worker.unhandled_error", {}, error);
     return new Response("Internal Server Error", { status: 500 });
 });
 
 app.get("/", (c) => c.json({ ok: true, service: "llmwikiworker" }));
 
 app.post("/webhook", async (c) => {
+    const requestId = crypto.randomUUID();
+    const startedAt = Date.now();
     const bodyText = await c.req.text();
     const signature = c.req.header("x-line-signature");
-    console.log("[webhook] received", {
+    logInfo("webhook.received", {
+        requestId,
         bodyLength: bodyText.length,
         hasSignature: Boolean(signature),
     });
@@ -34,22 +73,45 @@ app.post("/webhook", async (c) => {
             c.env.LINE_CHANNEL_SECRET,
         ))
     ) {
-        console.warn("[webhook] signature verification failed");
+        logWarn("webhook.signature_failed", { requestId });
         return c.text("Unauthorized", 401);
     }
 
     const payload = JSON.parse(bodyText);
     const events = Array.isArray(payload.events) ? payload.events : [];
-    console.log("[webhook] parsed payload", { eventCount: events.length });
-    await Promise.all(events.map((event) => handleLineEvent(event, c.env)));
+    logInfo("webhook.parsed", { requestId, eventCount: events.length });
+    c.executionCtx.waitUntil(
+        Promise.all(
+            events.map((event, index) =>
+                handleLineEvent(event, c.env, {
+                    requestId,
+                    eventIndex: index,
+                    totalEvents: events.length,
+                }),
+            ),
+        )
+            .then(() => {
+                logInfo("webhook.background_completed", {
+                    requestId,
+                    elapsedMs: Date.now() - startedAt,
+                });
+            })
+            .catch((error) => {
+                logError("webhook.background_failed", { requestId }, error);
+            }),
+    );
 
     return c.text("OK", 200);
 });
 
 export default app;
 
-export async function handleLineEvent(event, env) {
-    console.log("[line] handling event", {
+export async function handleLineEvent(event, env, trace = {}) {
+    const eventStartedAt = Date.now();
+    logInfo("line.event_received", {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
+        totalEvents: trace.totalEvents,
         type: event?.type,
         messageType: event?.message?.type,
         hasReplyToken: Boolean(event?.replyToken),
@@ -59,12 +121,18 @@ export async function handleLineEvent(event, env) {
         !event?.replyToken ||
         event.replyToken === "00000000000000000000000000000000"
     ) {
-        console.warn("[line] skip event without valid reply token");
+        logWarn("line.invalid_reply_token", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+        });
         return;
     }
 
     if (event.type !== "message" || event.message?.type !== "text") {
-        console.log("[line] unsupported message type");
+        logInfo("line.unsupported_message", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+        });
         return replyToLine(
             event.replyToken,
             "目前只支援文字訊息。",
@@ -77,112 +145,123 @@ export async function handleLineEvent(event, env) {
 
     try {
         const config = getRuntimeConfig(env);
-        console.log("[line] runtime config loaded", {
+        logInfo("line.runtime_config_loaded", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
             githubOwner: config.githubOwner,
             githubRepo: config.githubRepo,
             githubRef: config.githubRef,
             githubLogPath: config.githubLogPath,
             githubIndexPath: config.githubIndexPath,
-            githubAgentsPath: config.githubAgentsPath,
-            githubQueryRulesPath: config.githubQueryRulesPath,
             timezone: config.timezone,
-            aiModel: config.aiModel,
+            summaryAiModel: config.summaryAiModel,
+            summaryTimeoutMs: config.summaryTimeoutMs,
         });
 
         currentDateInfo = getCurrentDateInfo(config.timezone);
-        console.log("[line] user query", {
-            text,
+        const agentsContent = await fetchGithubFile(config, AGENTS_PATH, {
+            logInfo,
+        });
+        logInfo("line.agents_loaded", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            length: agentsContent.length,
+        });
+        logInfo("line.user_query", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            textPreview: toPreview(text),
             currentDate: currentDateInfo.isoDate,
         });
-        const targetDateInfo = await resolveTargetDate(
+
+        const route = await resolveFinalRoute({
             text,
             currentDateInfo,
-            env.AI,
-            config.aiModel,
-        );
-        console.log("[line] resolved target date", {
-            isoDate: targetDateInfo.isoDate,
-            displayDate: targetDateInfo.displayDate,
-            weekday: targetDateInfo.weekday,
-        });
-
-        const [logContent, indexContent, agentsContent, queryRulesContent] =
-            await Promise.all([
-                fetchGithubFile(config, config.githubLogPath),
-                fetchGithubFile(config, config.githubIndexPath),
-                fetchGithubFile(config, config.githubAgentsPath),
-                fetchGithubFile(config, config.githubQueryRulesPath),
-            ]);
-        console.log("[line] fetched knowledge files", {
-            logLength: logContent.length,
-            indexLength: indexContent.length,
-            agentsLength: agentsContent.length,
-            queryRulesLength: queryRulesContent.length,
-        });
-
-        const resolution = resolveSummaryPathsForDate(
-            logContent,
-            indexContent,
-            targetDateInfo,
-        );
-        console.log("[line] resolved summary paths", {
-            total: resolution.summaryPaths.length,
-            unresolvedCount: resolution.unresolvedReferences.length,
-        });
-
-        if (resolution.summaryPaths.length === 0) {
-            return replyToLine(
-                event.replyToken,
-                `${targetDateInfo.displayDate} 沒有可摘要的 summaries 紀錄。`,
-                env.LINE_CHANNEL_ACCESS_TOKEN,
-            );
-        }
-
-        const summarySources = await fetchSummaryFiles(
             config,
-            resolution.summaryPaths,
-        );
-        console.log("[line] fetched summary files", {
-            requested: resolution.summaryPaths.length,
-            found: summarySources.files.length,
-            missing: summarySources.missingPaths.length,
+            routerInstructions: agentsContent,
+            aiBinding: env.AI,
+            aiModel: config.summaryAiModel,
+            trace,
         });
-
-        if (summarySources.files.length === 0) {
+        if (route.rule === "D" && route.date) {
+            const targetDateInfo = buildDateInfoFromIsoDate(
+                route.date,
+                currentDateInfo.timezone,
+            );
+            logInfo("line.target_date_resolved_ai", {
+                requestId: trace.requestId,
+                eventIndex: trace.eventIndex,
+                isoDate: targetDateInfo.isoDate,
+                displayDate: targetDateInfo.displayDate,
+                weekday: targetDateInfo.weekday,
+                rule: route.rule || "",
+            });
+            const summarizeStartedAt = Date.now();
+            const summary = await summarizeRuleDWithTools({
+                userText: text,
+                currentDateInfo,
+                targetDateInfo,
+                aiBinding: env.AI,
+                aiModel: config.summaryAiModel,
+                config,
+                context: {
+                    timeoutMs: config.summaryTimeoutMs,
+                    rule: route.rule || "D",
+                    ruleContent: route.ruleContent || "",
+                },
+                trace: {
+                    requestId: trace.requestId,
+                    eventIndex: trace.eventIndex,
+                },
+            });
+            const message = clampLineText(summary);
+            logInfo("line.summary_generated", {
+                requestId: trace.requestId,
+                eventIndex: trace.eventIndex,
+                summaryLength: summary.length,
+                summaryPreview: toPreview(summary),
+                replyLength: message.length,
+                elapsedMs: Date.now() - summarizeStartedAt,
+                totalElapsedMs: Date.now() - eventStartedAt,
+            });
             return replyToLine(
                 event.replyToken,
-                `${targetDateInfo.displayDate} 有紀錄，但找不到可讀取的 summary 內容。`,
+                message,
                 env.LINE_CHANNEL_ACCESS_TOKEN,
             );
         }
 
-        const summary = await summarizeReadingLog(
-            summarySources.files,
-            currentDateInfo,
-            targetDateInfo,
-            env.AI,
-            config.aiModel,
-            {
-                agentsContent,
-                queryRulesContent,
-                unresolvedReferences: [
-                    ...resolution.unresolvedReferences,
-                    ...summarySources.missingPaths,
-                ],
-            },
-        );
-        const message = clampLineText(summary);
-        console.log("[line] summary generated", {
-            summaryLength: summary.length,
-            replyLength: message.length,
-        });
-        return replyToLine(
-            event.replyToken,
-            message,
-            env.LINE_CHANNEL_ACCESS_TOKEN,
-        );
+        if (route.rule === "B") {
+            const indexContent = await fetchGithubFile(
+                config,
+                config.githubIndexPath,
+                { logInfo },
+            );
+            return await handleRuleBFlow({
+                text,
+                currentDateInfo,
+                config,
+                env,
+                trace,
+                indexContent,
+                rule: route.rule,
+                ruleContent: route.ruleContent || "",
+                eventStartedAt,
+                replyToken: event.replyToken,
+            });
+        }
+
+        throw new Error("Unsupported routed rule");
     } catch (error) {
-        console.error("Failed to handle LINE command", error);
+        logError(
+            "line.handle_failed",
+            {
+                requestId: trace.requestId,
+                eventIndex: trace.eventIndex,
+                totalElapsedMs: Date.now() - eventStartedAt,
+            },
+            error,
+        );
         const fallbackMessage = buildUserErrorMessage(error, currentDateInfo);
         return replyToLine(
             event.replyToken,
@@ -190,6 +269,84 @@ export async function handleLineEvent(event, env) {
             env.LINE_CHANNEL_ACCESS_TOKEN,
         );
     }
+}
+
+async function handleRuleBFlow({
+    text,
+    currentDateInfo,
+    config,
+    env,
+    trace,
+    indexContent,
+    rule,
+    ruleContent,
+    eventStartedAt,
+    replyToken,
+}) {
+    const entries = parseSummaryIndexEntries(indexContent);
+    if (entries.length === 0) {
+        return replyToLine(
+            replyToken,
+            "目前找不到可查詢的 summaries 索引。",
+            env.LINE_CHANNEL_ACCESS_TOKEN,
+        );
+    }
+
+    const selectedPath = await resolveRuleBSummaryPath(
+        text,
+        indexContent,
+        entries,
+        env.AI,
+        config.summaryAiModel,
+        { requestId: trace.requestId, eventIndex: trace.eventIndex },
+        {
+            timeoutMs: config.summaryTimeoutMs,
+            rule,
+            ruleContent,
+        },
+    );
+
+    if (!selectedPath) {
+        return replyToLine(
+            replyToken,
+            "我目前找不到對應的主題摘要，你可以再多給我一點關鍵字。",
+            env.LINE_CHANNEL_ACCESS_TOKEN,
+        );
+    }
+
+    const summarySources = await fetchSummaryFiles([selectedPath], (path) =>
+        fetchGithubFile(config, path, { logInfo }),
+    );
+    if (summarySources.files.length === 0) {
+        return replyToLine(
+            replyToken,
+            "我有找到可能的主題，但目前無法讀取對應 summary 檔案。",
+            env.LINE_CHANNEL_ACCESS_TOKEN,
+        );
+    }
+
+    const formatted = await summarizeRuleBSummary(
+        summarySources.files[0],
+        text,
+        currentDateInfo,
+        env.AI,
+        config.summaryAiModel,
+        {
+            timeoutMs: config.summaryTimeoutMs,
+            rule,
+            ruleContent,
+        },
+        { requestId: trace.requestId, eventIndex: trace.eventIndex },
+    );
+    const message = clampLineText(formatted);
+    logInfo("line.query_summary_generated", {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
+        selectedPath,
+        replyLength: message.length,
+        totalElapsedMs: Date.now() - eventStartedAt,
+    });
+    return replyToLine(replyToken, message, env.LINE_CHANNEL_ACCESS_TOKEN);
 }
 
 export function getRuntimeConfig(env) {
@@ -213,12 +370,13 @@ export function getRuntimeConfig(env) {
         githubRef: env.GITHUB_REF || "main",
         githubLogPath: env.GITHUB_FILE_PATH || "wiki/log.md",
         githubIndexPath: env.GITHUB_INDEX_PATH || "wiki/index.md",
-        githubAgentsPath: env.GITHUB_AGENTS_PATH || "AGENTS.md",
-        githubQueryRulesPath:
-            env.GITHUB_QUERY_RULES_PATH || "wiki/rules/query-rules.md",
         githubToken: env.GITHUB_TOKEN,
         timezone: env.APP_TIMEZONE || "Asia/Taipei",
-        aiModel: env.AI_MODEL || "@cf/meta/llama-3.1-8b-instruct",
+        summaryAiModel:
+            env.SUMMARY_AI_MODEL ||
+            env.AI_MODEL ||
+            "@cf/meta/llama-3.1-8b-instruct",
+        summaryTimeoutMs: Number(env.SUMMARY_TIMEOUT_MS || 12000),
     };
 }
 
@@ -262,55 +420,6 @@ export function arrayBufferToBase64(buffer) {
         binary += String.fromCharCode(byte);
     }
     return btoa(binary);
-}
-
-export async function fetchGithubFile(config, filePath) {
-    const encodedPath = filePath
-        .split("/")
-        .map((segment) => encodeURIComponent(segment))
-        .join("/");
-    const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(config.githubOwner)}/${encodeURIComponent(config.githubRepo)}/contents/${encodedPath}?ref=${encodeURIComponent(config.githubRef)}`;
-    console.log("[github] fetching file", {
-        owner: config.githubOwner,
-        repo: config.githubRepo,
-        ref: config.githubRef,
-        path: filePath,
-    });
-
-    const response = await fetch(url, {
-        headers: {
-            Accept: "application/vnd.github+json",
-            Authorization: `Bearer ${config.githubToken}`,
-            "User-Agent": "llmwikiworker",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    });
-    console.log("[github] response", { status: response.status });
-
-    if (response.status === 404) {
-        throw new Error(`GitHub file not found: ${filePath}`);
-    }
-
-    if (response.status === 401 || response.status === 403) {
-        throw new Error("GitHub authentication failed");
-    }
-
-    if (!response.ok) {
-        throw new Error(`GitHub API failed with status ${response.status}`);
-    }
-
-    const payload = await response.json();
-    if (!payload?.content) {
-        throw new Error("GitHub API returned empty file content");
-    }
-
-    const normalized = payload.content.replace(/\n/g, "");
-    const bytes = Uint8Array.from(atob(normalized), (char) =>
-        char.charCodeAt(0),
-    );
-    const decoded = new TextDecoder().decode(bytes);
-    console.log("[github] decoded content", { length: decoded.length });
-    return decoded;
 }
 
 export function getCurrentDateInfo(timezone, now = new Date()) {
@@ -359,332 +468,638 @@ export function buildDateInfoFromIsoDate(isoDate, timezone) {
     };
 }
 
+export function detectReadingLookupDateFromText(userText, currentDateInfo) {
+    const text = String(userText || "").trim();
+    if (!text || !looksLikeReadingLookupText(text)) {
+        return null;
+    }
+
+    const explicitDate =
+        tryParseIsoLikeDate(text) ||
+        tryParseMonthDayDate(text, currentDateInfo);
+    if (explicitDate) {
+        return explicitDate;
+    }
+    if (/前天/.test(text)) {
+        return shiftDateByDays(currentDateInfo, -2).isoDate;
+    }
+    if (/昨天|昨日/.test(text)) {
+        return shiftDateByDays(currentDateInfo, -1).isoDate;
+    }
+    if (/今天|今日/.test(text)) {
+        return currentDateInfo.isoDate;
+    }
+    return null;
+}
+
+function buildDateInfoFromDate(date, timezone) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: timezone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    }).formatToParts(date);
+    const year = Number(parts.find((part) => part.type === "year")?.value);
+    const month = Number(parts.find((part) => part.type === "month")?.value);
+    const day = Number(parts.find((part) => part.type === "day")?.value);
+
+    return buildDateInfoFromIsoDate(
+        `${year}-${pad2(month)}-${pad2(day)}`,
+        timezone,
+    );
+}
+
 export function pad2(value) {
     return String(value).padStart(2, "0");
 }
 
-export function extractLogForDate(logContent, dateInfo) {
-    const variants = buildDateVariants(dateInfo);
-    const lines = logContent.split(/\r?\n/);
-    const blocks = [];
-    const seen = new Set();
-    const genericDateLine =
-        /^(\s{0,3}#{1,6}\s*)?(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日)/;
-
-    for (let index = 0; index < lines.length; index += 1) {
-        const line = lines[index];
-        if (!lineMatchesVariants(line, variants)) {
-            continue;
+export async function resolveIntentAndRule(
+    userText,
+    currentDateInfo,
+    instructions,
+    aiBinding,
+    aiModel,
+    trace = {},
+) {
+    const messages = [
+        {
+            role: "assistant",
+            content: buildIntentRouterSystemPrompt(currentDateInfo),
+        },
+        {
+            role: "user",
+            content: buildIntentRouterUserPrompt(userText),
+        },
+    ];
+    logInfo("ai.intent_router_started", {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
+        model: aiModel,
+        instructionLength: instructions.length,
+        instructionPreview: toPreviewWithLimit(instructions, 1200),
+        inputMessages: buildAiInputLog(messages),
+    });
+    const startedAt = Date.now();
+    const { result, text } = await runAiTextGeneration({
+        aiBinding,
+        aiModel,
+        instructions,
+        messages,
+        responseFormat: buildIntentRouterResponseFormat(),
+        temperature: 0.1,
+        timeoutMs: 12000,
+        timeoutMessage: "Workers AI intent routing timed out",
+        trace,
+        eventBase: "ai.intent_router",
+    });
+    let parsed = null;
+    try {
+        const response = result?.response;
+        if (
+            response &&
+            typeof response === "object" &&
+            !Array.isArray(response)
+        ) {
+            parsed = normalizeRuleRoute(response, currentDateInfo);
+        } else {
+            parsed = parseIntentRouter(
+                text || extractAiText(result),
+                currentDateInfo,
+            );
         }
-
-        const blockLines = [line];
-        let blankCount = 0;
-
-        for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
-            const nextLine = lines[cursor];
-            const trimmed = nextLine.trim();
-
-            if (
-                genericDateLine.test(trimmed) &&
-                !lineMatchesVariants(nextLine, variants)
-            ) {
-                break;
-            }
-
-            if (
-                /^\s*#{1,6}\s+/.test(trimmed) &&
-                !lineMatchesVariants(nextLine, variants)
-            ) {
-                break;
-            }
-
-            blockLines.push(nextLine);
-
-            if (trimmed === "") {
-                blankCount += 1;
-                if (blankCount >= 2) {
-                    break;
-                }
-            } else {
-                blankCount = 0;
-            }
-        }
-
-        const block = blockLines.join("\n").trim();
-        if (block && !seen.has(block)) {
-            blocks.push(block);
-            seen.add(block);
-        }
+    } catch (error) {
+        logWarn("ai.intent_router_parse_failed", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            outputRawPreview: toPreviewWithLimit(JSON.stringify(result), 1200),
+            errorMessage:
+                error instanceof Error ? error.message : String(error),
+        });
+        parsed = { rule: "B" };
     }
-
-    if (blocks.length > 0) {
-        return blocks.join("\n\n");
-    }
-
-    return extractParagraphMatches(logContent, variants);
+    logInfo("ai.intent_router_completed", {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
+        rule: parsed.rule || "",
+        date: parsed.date || "",
+        outputRawPreview: toPreviewWithLimit(JSON.stringify(result), 1200),
+        elapsedMs: Date.now() - startedAt,
+    });
+    return parsed;
 }
 
-export function extractLogBlocksForDate(logContent, dateInfo) {
-    const variants = buildDateVariants(dateInfo);
-    const lines = logContent.split(/\r?\n/);
-    const blocks = [];
-    let currentHeader = null;
-    let currentLines = [];
-
-    for (const line of lines) {
-        if (/^\s*##\s+/.test(line)) {
-            if (currentHeader && lineMatchesVariants(currentHeader, variants)) {
-                blocks.push([currentHeader, ...currentLines].join("\n").trim());
-            }
-            currentHeader = line;
-            currentLines = [];
-            continue;
-        }
-
-        if (currentHeader) {
-            currentLines.push(line);
-        }
-    }
-
-    if (currentHeader && lineMatchesVariants(currentHeader, variants)) {
-        blocks.push([currentHeader, ...currentLines].join("\n").trim());
-    }
-
-    return blocks.filter(Boolean);
-}
-
-export function parsePathList(value) {
-    const inlineCodeMatches = [...value.matchAll(/`([^`]+)`/g)].map(
-        (match) => match[1],
+async function resolveFinalRoute({
+    text,
+    currentDateInfo,
+    config,
+    routerInstructions,
+    aiBinding,
+    aiModel,
+    trace,
+}) {
+    const routeTrace = {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
+    };
+    let route = await resolveIntentAndRule(
+        text,
+        currentDateInfo,
+        routerInstructions,
+        aiBinding,
+        aiModel,
+        routeTrace,
     );
-    if (inlineCodeMatches.length > 0) {
-        return inlineCodeMatches;
+
+    const forcedDate = detectReadingLookupDateFromText(text, currentDateInfo);
+    if (forcedDate && route.rule !== "D") {
+        route = { ...route, rule: "D", date: forcedDate };
+        logInfo("line.route_overridden_to_rule_d", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            reason: "local_reading_lookup_detected",
+            forcedDate,
+        });
     }
 
-    return value
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
+    if (route.rule === "B" || route.rule === "D") {
+        const ruleContext = await resolveRuleContext(
+            route.rule,
+            config,
+            routeTrace,
+        );
+        route = {
+            ...route,
+            rulePath: ruleContext.rulePath,
+            ruleContent: ruleContext.ruleContent,
+        };
+    }
+    return route;
 }
 
-export function extractSummaryReferencesFromLog(logContent, dateInfo) {
-    const blocks = extractLogBlocksForDate(logContent, dateInfo);
-    const references = [];
-
-    for (const block of blocks) {
-        const lines = block.split(/\r?\n/);
-        for (const line of lines) {
-            const match = line.match(/^\s*-\s*(created|updated)\s*:\s*(.+)$/i);
-            if (!match) {
-                continue;
-            }
-            references.push(...parsePathList(match[2]));
-        }
+async function resolveRuleContext(rule, config, trace = {}) {
+    const treeResult = await executeSummaryToolCall(
+        "get_file_tree",
+        { base_path: "wiki/rules", max_depth: 2 },
+        {
+            config,
+            trace,
+            logInfo,
+        },
+    );
+    const resolvedRule = await executeSummaryToolCall(
+        "resolve_rule_file",
+        { rule, tree: treeResult.tree || [] },
+        {
+            trace,
+            logInfo,
+        },
+    );
+    if (!resolvedRule?.matched || !resolvedRule?.path) {
+        throw new Error(`Unable to resolve rule file for rule ${rule}`);
     }
-
-    return references;
-}
-
-export function normalizeWikiPath(rawPath) {
-    const cleaned = rawPath.trim().replace(/^['"`]|['"`]$/g, "");
-    const slashNormalized = cleaned.replace(/\\/g, "/");
-    const wikiIndex = slashNormalized.indexOf("wiki/");
-    if (wikiIndex >= 0) {
-        return slashNormalized.slice(wikiIndex);
-    }
-
-    if (slashNormalized.startsWith("./")) {
-        return slashNormalized.slice(2);
-    }
-
-    if (slashNormalized.startsWith("/")) {
-        return slashNormalized.slice(1);
-    }
-
-    return slashNormalized;
-}
-
-export function parseSummaryIndex(indexContent) {
-    const lines = indexContent.split(/\r?\n/);
-    let inSummariesSection = false;
-    const mapping = new Map();
-
-    for (const line of lines) {
-        if (/^\s*##\s+Summaries\s*$/i.test(line)) {
-            inSummariesSection = true;
-            continue;
-        }
-
-        if (/^\s*##\s+/.test(line) && !/^\s*##\s+Summaries\s*$/i.test(line)) {
-            inSummariesSection = false;
-            continue;
-        }
-
-        if (!inSummariesSection) {
-            continue;
-        }
-
-        const linkMatch = line.match(/\[([^\]]+)\]\(([^)]+)\)/);
-        if (!linkMatch) {
-            continue;
-        }
-
-        const slug = linkMatch[1].trim().toLowerCase();
-        const path = normalizeWikiPath(linkMatch[2]);
-        if (path.includes("wiki/summaries/") && path.endsWith(".md")) {
-            mapping.set(slug, path);
-        }
-    }
-
-    return mapping;
-}
-
-export function resolveSummaryPathsForDate(logContent, indexContent, dateInfo) {
-    const references = extractSummaryReferencesFromLog(logContent, dateInfo);
-    const indexMap = parseSummaryIndex(indexContent);
-    const summaryPaths = new Set();
-    const unresolvedReferences = [];
-
-    for (const reference of references) {
-        const normalized = normalizeWikiPath(reference);
-        const lowered = normalized.toLowerCase();
-
-        if (lowered.startsWith("wiki/summaries/") && lowered.endsWith(".md")) {
-            summaryPaths.add(normalized);
-            continue;
-        }
-
-        const slug = lowered.replace(/\.md$/, "").split("/").pop();
-        const fromIndex = slug ? indexMap.get(slug) : null;
-        if (fromIndex) {
-            summaryPaths.add(fromIndex);
-            continue;
-        }
-
-        unresolvedReferences.push(reference);
-    }
-
+    const fileResult = await executeSummaryToolCall(
+        "get_file",
+        { path: resolvedRule.path },
+        {
+            config,
+            trace,
+            logInfo,
+        },
+    );
     return {
-        summaryPaths: Array.from(summaryPaths),
-        unresolvedReferences,
+        rulePath: fileResult.path,
+        ruleContent: fileResult.content || "",
     };
 }
 
-export async function fetchSummaryFiles(config, paths) {
-    const files = [];
-    const missingPaths = [];
-
-    await Promise.all(
-        paths.map(async (path) => {
-            try {
-                const content = await fetchGithubFile(config, path);
-                files.push({ path, content });
-            } catch (error) {
-                const message =
-                    error instanceof Error ? error.message : String(error);
-                if (message.includes("GitHub file not found")) {
-                    missingPaths.push(path);
-                    return;
-                }
-                throw error;
-            }
-        }),
-    );
-
-    return { files, missingPaths };
-}
-
-export function buildDateVariants(dateInfo) {
-    return [
-        `${dateInfo.year}-${pad2(dateInfo.month)}-${pad2(dateInfo.day)}`,
-        `${dateInfo.year}-${dateInfo.month}-${dateInfo.day}`,
-        `${dateInfo.year}/${pad2(dateInfo.month)}/${pad2(dateInfo.day)}`,
-        `${dateInfo.year}/${dateInfo.month}/${dateInfo.day}`,
-        `${dateInfo.year}.${pad2(dateInfo.month)}.${pad2(dateInfo.day)}`,
-        `${dateInfo.year}.${dateInfo.month}.${dateInfo.day}`,
-        `${dateInfo.year}年${dateInfo.month}月${dateInfo.day}日`,
-        `${dateInfo.year}年${pad2(dateInfo.month)}月${pad2(dateInfo.day)}日`,
-    ];
-}
-
-export function lineMatchesVariants(line, variants) {
-    return variants.some((variant) => line.includes(variant));
-}
-
-export function extractParagraphMatches(logContent, variants) {
-    const sections = logContent.split(/\n{2,}/);
-    const matches = sections.filter((section) =>
-        lineMatchesVariants(section, variants),
-    );
-    return matches.join("\n\n").trim();
-}
-
-export async function resolveTargetDate(
-    userText,
-    currentDateInfo,
-    aiBinding,
-    aiModel,
-) {
-    if (!aiBinding?.run) {
-        throw new Error("Workers AI binding is not configured");
-    }
-
-    console.log("[ai] resolving target date", {
-        model: aiModel,
-        currentDate: currentDateInfo.isoDate,
-        userText,
-    });
-    const result = await aiBinding.run(aiModel, {
-        messages: [
-            {
-                role: "system",
-                content: buildDateResolutionSystemPrompt(currentDateInfo),
-            },
-            {
-                role: "user",
-                content: buildDateResolutionUserPrompt(userText),
-            },
-            {
-                role: "assistant",
-                content: buildDateResolutionAssistantPrompt(),
-            },
-        ],
-    });
-
-    const text = extractAiText(result);
-    console.log("[ai] date resolution raw output", {
-        length: text.length,
-        preview: text.slice(0, 200),
-    });
-    const parsed = parseDateResolution(text);
-
-    if (parsed.intent !== "reading_lookup" || !parsed.date) {
-        throw new Error("Unsupported reading lookup request");
-    }
-
-    return buildDateInfoFromIsoDate(parsed.date, currentDateInfo.timezone);
-}
-
-export function parseDateResolution(text) {
+export function parseSummaryLookupDecision(text) {
     const trimmed = text.trim();
     const jsonStart = trimmed.indexOf("{");
     const jsonEnd = trimmed.lastIndexOf("}");
 
     if (jsonStart === -1 || jsonEnd === -1 || jsonEnd < jsonStart) {
-        throw new Error("Workers AI returned an invalid date resolution payload");
+        throw new Error(
+            "Workers AI returned an invalid summary lookup payload",
+        );
     }
 
     const candidate = trimmed.slice(jsonStart, jsonEnd + 1);
     const parsed = JSON.parse(candidate);
+    return parsed;
+}
+
+export async function resolveRuleBSummaryPath(
+    userText,
+    indexContent,
+    summaryEntries,
+    aiBinding,
+    aiModel,
+    trace = {},
+    context = {},
+) {
+    assertAiBindingConfigured(aiBinding);
+
+    const instructions = String(context.ruleContent || "").trim();
+    const messages = [
+        {
+            role: "assistant",
+            content: buildSummaryLookupAssistantPrompt(),
+        },
+        {
+            role: "user",
+            content: buildSummaryLookupUserPrompt(userText, indexContent),
+        },
+    ];
+
+    logInfo("ai.summary_lookup_started", {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
+        model: aiModel,
+        candidateCount: summaryEntries.length,
+        instructionLength: instructions.length,
+        instructionPreview: toPreviewWithLimit(instructions, 1200),
+        inputMessages: buildAiInputLog(messages),
+    });
+
+    const startedAt = Date.now();
+    const { text, result } = await runAiTextGeneration({
+        aiBinding,
+        aiModel,
+        instructions,
+        messages,
+        responseFormat: buildSummaryLookupResponseFormat(),
+        temperature: 0.1,
+        timeoutMs: context.timeoutMs || 12000,
+        timeoutMessage: "Workers AI summary lookup timed out",
+        trace,
+        eventBase: "ai.summary_lookup",
+    });
+    let parsed = null;
+    const response = result?.response;
+    if (response && typeof response === "object" && !Array.isArray(response)) {
+        parsed = response;
+    } else {
+        try {
+            parsed = parseSummaryLookupDecision(extractAiText(result));
+        } catch {
+            parsed = null;
+        }
+    }
+    if (!parsed) {
+        if (summaryEntries.length === 1) {
+            const fallbackPath = summaryEntries[0]?.path || null;
+            logWarn("ai.summary_lookup_single_candidate_fallback", {
+                requestId: trace.requestId,
+                eventIndex: trace.eventIndex,
+                fallbackPath: fallbackPath || "",
+                outputRawPreview: toPreviewWithLimit(JSON.stringify(result), 1200),
+                outputTextPreview: toPreviewWithLimit(text, 1200),
+            });
+            return fallbackPath;
+        }
+        logWarn("ai.summary_lookup_parse_failed", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            outputRawPreview: toPreviewWithLimit(JSON.stringify(result), 1200),
+            outputTextPreview: toPreviewWithLimit(text, 1200),
+            errorMessage:
+                "Workers AI returned an invalid summary lookup payload",
+        });
+        return null;
+    }
+    logInfo("ai.summary_lookup_completed", {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
+        elapsedMs: Date.now() - startedAt,
+        decision: parsed.intent || "unknown",
+        path: parsed.path || "",
+        outputRawPreview: toPreviewWithLimit(JSON.stringify(result), 1200),
+        outputTextPreview: toPreviewWithLimit(text, 1200),
+    });
 
     if (
-        parsed.intent === "reading_lookup" &&
-        !/^\d{4}-\d{2}-\d{2}$/.test(parsed.date || "")
+        parsed.intent === "unsupported" &&
+        summaryEntries.length === 1 &&
+        summaryEntries[0]?.path
     ) {
-        throw new Error("Workers AI returned an invalid date format");
+        const fallbackPath = summaryEntries[0].path;
+        logWarn("ai.summary_lookup_unsupported_single_candidate_fallback", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            fallbackPath,
+            outputRawPreview: toPreviewWithLimit(JSON.stringify(result), 1200),
+            outputTextPreview: toPreviewWithLimit(text, 1200),
+        });
+        return fallbackPath;
     }
 
-    return parsed;
+    if (parsed.intent !== "summary_lookup" || !parsed.path) {
+        return null;
+    }
+    const normalizedPath = normalizeWikiPath(parsed.path);
+    const matched = summaryEntries.find((entry) => entry.path === normalizedPath);
+    return matched?.path || null;
+}
+
+function parseIntentRouter(text, currentDateInfo) {
+    const trimmed = String(text || "").trim();
+    const jsonStart = trimmed.indexOf("{");
+    const jsonEnd = trimmed.lastIndexOf("}");
+    if (jsonStart === -1 || jsonEnd === -1 || jsonEnd < jsonStart) {
+        throw new Error("Workers AI returned an invalid intent router payload");
+    }
+    const parsed = JSON.parse(trimmed.slice(jsonStart, jsonEnd + 1));
+    return normalizeRuleRoute(parsed, currentDateInfo);
+}
+
+function normalizeRuleRoute(payload, currentDateInfo) {
+    if (!payload || typeof payload !== "object") {
+        throw new Error("Workers AI returned an invalid intent router payload");
+    }
+    const normalizedRule = String(payload.rule || "")
+        .trim()
+        .toUpperCase();
+    if (normalizedRule === "D") {
+        const normalized = { rule: "D" };
+        if (/^\d{4}-\d{2}-\d{2}$/.test(payload.date || "")) {
+            normalized.date = payload.date;
+        } else {
+            normalized.date = currentDateInfo.isoDate;
+        }
+        return normalized;
+    }
+    return { rule: "B" };
+}
+
+function looksLikeReadingLookupText(text) {
+    return /(讀了什麼|看了什麼|閱讀紀錄|讀過什麼|what did i read)/i.test(text);
+}
+
+function tryParseIsoLikeDate(text) {
+    const match = text.match(/\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b/);
+    if (!match) {
+        return null;
+    }
+    return buildIsoDateIfValid(
+        Number(match[1]),
+        Number(match[2]),
+        Number(match[3]),
+    );
+}
+
+function tryParseMonthDayDate(text, currentDateInfo) {
+    const match = text.match(/\b(\d{1,2})[/-](\d{1,2})\b/);
+    if (!match) {
+        return null;
+    }
+    return buildIsoDateIfValid(
+        currentDateInfo.year,
+        Number(match[1]),
+        Number(match[2]),
+    );
+}
+
+function buildIsoDateIfValid(year, month, day) {
+    if (
+        !Number.isInteger(year) ||
+        !Number.isInteger(month) ||
+        !Number.isInteger(day)
+    ) {
+        return null;
+    }
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+        return null;
+    }
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (
+        date.getUTCFullYear() !== year ||
+        date.getUTCMonth() + 1 !== month ||
+        date.getUTCDate() !== day
+    ) {
+        return null;
+    }
+    return `${year}-${pad2(month)}-${pad2(day)}`;
+}
+
+function shiftDateByDays(currentDateInfo, days) {
+    const date = new Date(
+        Date.UTC(
+            currentDateInfo.year,
+            currentDateInfo.month - 1,
+            currentDateInfo.day,
+        ),
+    );
+    date.setUTCDate(date.getUTCDate() + days);
+    return buildDateInfoFromDate(date, currentDateInfo.timezone);
+}
+
+export async function summarizeRuleDWithTools({
+    userText,
+    currentDateInfo,
+    targetDateInfo,
+    aiBinding,
+    aiModel,
+    config,
+    context = {},
+    trace = {},
+}) {
+    assertAiBindingConfigured(aiBinding);
+
+    const instructions = String(context.ruleContent || "").trim();
+    const messages = [
+        {
+            role: "user",
+            content: `使用者問題：${userText}\n目標日期：${targetDateInfo.isoDate}\n指定規則：${context.rule || "D"}\n今天基準：${currentDateInfo.displayDate} ${currentDateInfo.weekday} (${currentDateInfo.timezone})`,
+        },
+    ];
+
+    const readingToolNames = [
+        "get_log_for_date",
+        "resolve_summary_paths",
+        "get_summary_files",
+    ];
+    const tools = buildReadingFlowTools().filter((tool) =>
+        readingToolNames.includes(tool.function?.name),
+    );
+    const toolExecutionContext = {
+        config,
+        currentDateInfo,
+        trace,
+        buildDateInfoFromIsoDate,
+        parseSummaryIndex,
+        normalizeWikiPath,
+        extractSummaryReferencesFromLog,
+        extractLogForDate,
+        fetchSummaryFiles,
+        logInfo,
+    };
+    const runSummaryTool = (name, args) =>
+        executeSummaryToolCall(name, args, toolExecutionContext);
+    logInfo("ai.summary_tool_planning_started", {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
+        model: aiModel,
+        targetDate: targetDateInfo.isoDate,
+        instructionLength: instructions.length,
+        instructionPreview: toPreviewWithLimit(instructions, 1200),
+        inputMessages: buildAiInputLog(messages),
+        tools: tools.map((tool) => tool.function?.name).filter(Boolean),
+    });
+
+    const summarizeStartedAt = Date.now();
+    let conversation = [...messages];
+    let latestFiles = null;
+    let unresolvedReferences = [];
+    let resolvedSummaryPaths = [];
+    const maxRounds = 6;
+    for (let round = 0; round < maxRounds; round += 1) {
+        const roundStartedAt = Date.now();
+        let roundTimer = null;
+        const result = await Promise.race([
+            aiBinding.run(aiModel, {
+                instructions,
+                messages: conversation,
+                tools,
+                reasoning: {
+                    effort: round === 0 ? "medium" : "low",
+                    summary: "concise",
+                },
+                max_tokens: DEFAULT_MAX_TOKENS,
+                temperature: 0.1,
+            }),
+            new Promise((_, reject) => {
+                roundTimer = setTimeout(
+                    () => reject(new Error("Workers AI summary timed out")),
+                    context.timeoutMs || 12000,
+                );
+            }),
+        ]).finally(() => {
+            if (roundTimer) {
+                clearTimeout(roundTimer);
+            }
+        });
+        const toolCalls = extractToolCalls(result);
+        logInfo("ai.summary_tool_round_completed", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            round: round + 1,
+            toolCallCount: toolCalls.length,
+            outputRawPreview: toPreviewWithLimit(JSON.stringify(result), 1200),
+            elapsedMs: Date.now() - roundStartedAt,
+        });
+
+        if (toolCalls.length === 0) {
+            break;
+        }
+
+        const toolMessages = [];
+        const assistantCallMessage = buildAssistantToolCallMessage(toolCalls);
+        for (let index = 0; index < toolCalls.length; index += 1) {
+            const toolCall = toolCalls[index];
+            const name = getToolCallName(toolCall);
+            const id = getToolCallId(toolCall, index);
+            const args = parseToolCallArguments(toolCall);
+            const toolResult = await runSummaryTool(name, args);
+            if (name === "get_summary_files") {
+                latestFiles = toolResult?.files || [];
+            }
+            if (name === "resolve_summary_paths") {
+                unresolvedReferences = toolResult?.unresolvedReferences || [];
+                resolvedSummaryPaths = toolResult?.summaryPaths || [];
+            }
+            toolMessages.push({
+                role: "tool",
+                tool_call_id: id,
+                name,
+                content: JSON.stringify(toolResult),
+            });
+        }
+        conversation = [...conversation, assistantCallMessage, ...toolMessages];
+        if (Array.isArray(latestFiles) && latestFiles.length > 0) {
+            break;
+        }
+    }
+
+    if (!latestFiles && resolvedSummaryPaths.length === 0) {
+        const logResult = await runSummaryTool("get_log_for_date", {
+            date: targetDateInfo.isoDate,
+        });
+        const resolvedResult = await runSummaryTool("resolve_summary_paths", {
+            references: logResult?.references || [],
+        });
+        resolvedSummaryPaths = resolvedResult?.summaryPaths || [];
+        unresolvedReferences = resolvedResult?.unresolvedReferences || [];
+
+        const filesResult = await runSummaryTool("get_summary_files", {
+            paths: resolvedSummaryPaths,
+        });
+        latestFiles = filesResult?.files || [];
+        unresolvedReferences = [
+            ...unresolvedReferences,
+            ...(filesResult?.missingPaths || []),
+        ];
+        logInfo("ai.summary_tool_forced_pipeline_completed", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            referenceCount: (logResult?.references || []).length,
+            resolvedCount: resolvedSummaryPaths.length,
+            foundCount: latestFiles.length,
+        });
+    }
+
+    if (!latestFiles && resolvedSummaryPaths.length > 0) {
+        const summarySources = await fetchSummaryFiles(
+            resolvedSummaryPaths,
+            (path) => fetchGithubFile(config, path, { logInfo }),
+        );
+        latestFiles = summarySources.files;
+        unresolvedReferences = [
+            ...unresolvedReferences,
+            ...(summarySources.missingPaths || []),
+        ];
+        logInfo("ai.summary_tool_postfetch_completed", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            resolvedCount: resolvedSummaryPaths.length,
+            foundCount: latestFiles.length,
+            missingCount: (summarySources.missingPaths || []).length,
+        });
+    }
+
+    if (Array.isArray(latestFiles) && latestFiles.length === 0) {
+        logInfo("ai.summary_no_files_confirmed", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            targetDate: targetDateInfo.isoDate,
+        });
+        return `${targetDateInfo.displayDate} 沒有可摘要的 summaries 紀錄。`;
+    }
+    if (Array.isArray(latestFiles) && latestFiles.length > 0) {
+        const summary = await summarizeReadingLog(
+            latestFiles,
+            currentDateInfo,
+            targetDateInfo,
+            aiBinding,
+            aiModel,
+            {
+                timeoutMs: context.timeoutMs,
+                ruleContent: context.ruleContent || "",
+                unresolvedReferences,
+            },
+            trace,
+        );
+        logInfo("ai.summary_completed", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            length: summary.length,
+            mode: "tools_to_shared_summary",
+            preview: toPreview(summary),
+            elapsedMs: Date.now() - summarizeStartedAt,
+        });
+        return summary;
+    }
+
+    return `${targetDateInfo.displayDate} 有紀錄，但目前無法生成摘要。`;
 }
 
 export async function summarizeReadingLog(
@@ -694,89 +1109,144 @@ export async function summarizeReadingLog(
     aiBinding,
     aiModel,
     context,
+    trace = {},
 ) {
-    if (!aiBinding?.run) {
-        throw new Error("Workers AI binding is not configured");
-    }
+    assertAiBindingConfigured(aiBinding);
+    return generateSharedSummary({
+        summaryFiles,
+        currentDateInfo,
+        targetDateInfo,
+        aiBinding,
+        aiModel,
+        context,
+        trace,
+        eventBase: "ai.summary",
+        startedEvent: "ai.summary_started",
+        completedEvent: "ai.summary_completed",
+        emptyEvent: "ai.summary_empty_output",
+        timeoutMessage: "Workers AI summary timed out",
+        emptyMessage: `${targetDateInfo.displayDate} 有紀錄，但目前無法生成摘要。`,
+    });
+}
 
-    console.log("[ai] summarizing reading log", {
+export async function summarizeRuleBSummary(
+    summaryFile,
+    userText,
+    currentDateInfo,
+    aiBinding,
+    aiModel,
+    context,
+    trace = {},
+) {
+    assertAiBindingConfigured(aiBinding);
+    return generateSharedSummary({
+        summaryFiles: [summaryFile],
+        currentDateInfo,
+        aiBinding,
+        aiModel,
+        context: {
+            ...context,
+            userText,
+        },
+        trace,
+        eventBase: "ai.query_summary",
+        startedEvent: "ai.query_summary_started",
+        completedEvent: "ai.query_summary_completed",
+        emptyEvent: "ai.query_summary_empty_output",
+        timeoutMessage: "Workers AI query summary timed out",
+        emptyMessage: "我有找到相關的 summary，但目前無法整理成回覆。",
+    });
+}
+
+async function generateSharedSummary({
+    summaryFiles,
+    currentDateInfo,
+    targetDateInfo = null,
+    aiBinding,
+    aiModel,
+    context,
+    trace = {},
+    eventBase,
+    startedEvent,
+    completedEvent,
+    emptyEvent,
+    timeoutMessage,
+    emptyMessage,
+}) {
+    const instructions = String(context.ruleContent || "").trim();
+    const messages = [
+        {
+            role: "assistant",
+            content: buildSummaryReplyAssistantPrompt(),
+        },
+        {
+            role: "assistant",
+            content:
+                "請直接輸出純文字內容，不要使用 Markdown 格式，並可適度加入必要 Emoji。",
+        },
+        {
+            role: "user",
+            content: buildSummaryUserPrompt(summaryFiles, {
+                targetDateInfo,
+                userText: context.userText,
+                unresolvedReferences: context.unresolvedReferences,
+            }),
+        },
+    ];
+
+    logInfo(startedEvent, {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
         model: aiModel,
         summaryFileCount: summaryFiles.length,
         currentDate: currentDateInfo.isoDate,
-        targetDate: targetDateInfo.isoDate,
-        agentsLength: context.agentsContent.length,
-        queryRulesLength: context.queryRulesContent.length,
-        unresolvedCount: context.unresolvedReferences.length,
+        targetDate: targetDateInfo?.isoDate || "",
+        unresolvedCount: context.unresolvedReferences?.length || 0,
+        timeoutMs: context.timeoutMs,
+        instructionLength: instructions.length,
+        instructionPreview: toPreviewWithLimit(instructions, 1200),
+        inputMessages: buildAiInputLog(messages),
     });
-    const result = await aiBinding.run(aiModel, {
-        messages: [
-            {
-                role: "system",
-                content: buildSummarySystemPrompt(
-                    currentDateInfo,
-                    context.agentsContent,
-                    context.queryRulesContent,
-                ),
-            },
-            {
-                role: "user",
-                content: buildSummaryUserPrompt(
-                    summaryFiles,
-                    targetDateInfo,
-                    context.unresolvedReferences,
-                ),
-            },
-        ],
+    const startedAt = Date.now();
+    const { text, result, mode } = await runAiTextGeneration({
+        aiBinding,
+        aiModel,
+        instructions,
+        messages,
+        responseFormat: buildSummaryReplyResponseFormat(),
+        extractText: extractSummaryReplyFromResult,
+        temperature: 0.2,
+        timeoutMs: context.timeoutMs,
+        timeoutMessage,
+        trace,
+        eventBase,
     });
-
-    const text = extractAiText(result);
     if (!text) {
-        throw new Error("Workers AI returned an empty summary");
+        logWarn(emptyEvent, {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            outputRawPreview: toPreviewWithLimit(JSON.stringify(result), 2000),
+        });
+        return emptyMessage;
     }
 
     const trimmed = text.trim();
-    console.log("[ai] summary output", { length: trimmed.length });
+    logInfo(completedEvent, {
+        requestId: trace.requestId,
+        eventIndex: trace.eventIndex,
+        elapsedMs: Date.now() - startedAt,
+        length: trimmed.length,
+        mode,
+        outputRawPreview: toPreviewWithLimit(JSON.stringify(result), 1200),
+        preview: toPreview(trimmed),
+    });
     return trimmed;
 }
 
-export function extractAiText(result) {
-    if (!result) {
-        return "";
+function assertAiBindingConfigured(aiBinding) {
+    if (!aiBinding?.run) {
+        throw new Error("Workers AI binding is not configured");
     }
-
-    if (typeof result === "string") {
-        return result;
-    }
-
-    if (typeof result.response === "string") {
-        return result.response;
-    }
-
-    if (typeof result.output_text === "string") {
-        return result.output_text;
-    }
-
-    if (Array.isArray(result.result?.messages)) {
-        const joined = result.result.messages
-            .map((message) => message?.content)
-            .filter(Boolean)
-            .join("\n");
-        if (joined) {
-            return joined;
-        }
-    }
-
-    if (Array.isArray(result.choices)) {
-        const joined = result.choices
-            .map((choice) => choice?.message?.content || choice?.text)
-            .filter(Boolean)
-            .join("\n");
-        if (joined) {
-            return joined;
-        }
-    }
-
-    return "";
 }
 
 export function clampLineText(text) {
@@ -804,6 +1274,10 @@ export function buildUserErrorMessage(error, currentDateInfo) {
         return "目前無法讀取 GitHub 私有內容，請檢查 GitHub Token。";
     }
 
+    if (message.includes("summary timed out")) {
+        return "摘要整理逾時，請稍後再試，或改查較短時間範圍。";
+    }
+
     if (message.includes("Workers AI")) {
         return "找到相關日期後，暫時無法完成整理，請稍後再試。";
     }
@@ -820,6 +1294,7 @@ export async function replyToLine(replyToken, text, channelAccessToken) {
         throw new Error("Missing LINE_CHANNEL_ACCESS_TOKEN");
     }
 
+    const startedAt = Date.now();
     const response = await fetch(LINE_REPLY_ENDPOINT, {
         method: "POST",
         headers: {
@@ -831,9 +1306,10 @@ export async function replyToLine(replyToken, text, channelAccessToken) {
             messages: [{ type: "text", text }],
         }),
     });
-    console.log("[line] reply response", {
+    logInfo("line.reply_response", {
         status: response.status,
         replyLength: text.length,
+        elapsedMs: Date.now() - startedAt,
     });
 
     if (!response.ok) {
@@ -843,3 +1319,13 @@ export async function replyToLine(replyToken, text, channelAccessToken) {
         );
     }
 }
+
+export {
+    buildDateVariants,
+    extractLogForDate,
+    extractSummaryReferencesFromLog,
+    normalizeWikiPath,
+    parseSummaryIndex,
+    parseSummaryIndexEntries,
+    resolveSummaryPathsForDate,
+};

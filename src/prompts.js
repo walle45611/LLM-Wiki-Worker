@@ -1,73 +1,79 @@
-export function buildDateResolutionSystemPrompt(currentDateInfo) {
-    return `你是日期語意解析器。你的工作是從使用者的繁體中文訊息中判斷他想查詢哪一天的閱讀紀錄。
+const MAX_SUMMARY_FILE_CHARS = 3200;
+const MAX_INDEX_CHARS = 10000;
 
-今天的基準日期資訊如下：
-- 西元年份：${currentDateInfo.year}
-- 日期：${currentDateInfo.displayDate}
-- 星期：${currentDateInfo.weekday}
-- 時區：${currentDateInfo.timezone}
+export function buildIntentRouterSystemPrompt(currentDateInfo) {
+    return `你是 rule router。
 
-請依據上面的基準日期理解相對時間，例如「昨天」、「前天」、「大前天」。
-如果使用者只寫月日，例如「4/18 我讀了什麼」，優先視為今年的 4 月 18 日。
-只有在使用者明確表達是查詢某一天讀了什麼時，才回傳成功結果。
-回覆必須是單一 JSON，不要加上任何額外文字或 Markdown。
+今天日期：${currentDateInfo.displayDate} ${currentDateInfo.weekday} (${currentDateInfo.timezone})
 
-JSON 格式如下：
-{"intent":"reading_lookup","date":"YYYY-MM-DD"}
+IMPORTANT 規則：
+- 有明確時間、日期、相對時間，且是在問某天讀了什麼：rule=D，並回 date（YYYY-MM-DD）
+- 主題查詢、summary 查詢、概念整理：rule=B
+- 無法判斷時：預設 rule=B
 
-若無法判斷或不是查詢閱讀紀錄，請回：
-{"intent":"unsupported"}`;
+IMPORTANT 只回單一 JSON，不要加任何額外文字。`;
 }
 
-export function buildDateResolutionUserPrompt(userText) {
-    return `請解析這句話要查詢的日期：${userText}`;
+export function buildIntentRouterUserPrompt(userText) {
+    return String(userText || "").trim();
 }
 
-export function buildDateResolutionAssistantPrompt() {
-    return '{"intent":"reading_lookup","date":"YYYY-MM-DD"}';
-}
-
-export function buildSummarySystemPrompt(
-    currentDateInfo,
-    agentsContent,
-    queryRulesContent,
-) {
-    return `你是閱讀紀錄整理助手。請用繁體中文輸出精簡摘要，聚焦指定日期讀了哪些主題、重點與可能的收穫。不要捏造未出現在原文中的資訊。
-
-今天的基準日期資訊如下：
-- 西元年份：${currentDateInfo.year}
-- 日期：${currentDateInfo.displayDate}
-- 星期：${currentDateInfo.weekday}
-- 時區：${currentDateInfo.timezone}
-
-以下是專案角色定義（AGENTS.md）：
-${agentsContent}
-
-以下是查詢流程規範（wiki/rules/query-rules.md）：
-${queryRulesContent}`;
-}
-
-export function buildSummaryUserPrompt(
-    summaryFiles,
-    targetDateInfo,
-    unresolvedReferences = [],
-) {
+export function buildSummaryUserPrompt(summaryFiles, context = {}) {
+    const {
+        targetDateInfo,
+        userText = "",
+        unresolvedReferences = [],
+    } = context;
     const filePayload = summaryFiles
         .map(
             (file) =>
-                `--- FILE: ${file.path} ---\n${file.content.trim() || "(empty)"}`,
+                `--- FILE: ${file.path} ---\n${compactText(file.content, MAX_SUMMARY_FILE_CHARS) || "(empty)"}`,
         )
         .join("\n\n");
     const unresolvedText =
         unresolvedReferences.length > 0
             ? `\n\n另外有以下參照無法定位為 summary 檔案（可忽略，不要猜測內容）：\n${unresolvedReferences.map((item) => `- ${item}`).join("\n")}`
             : "";
-
-    return `使用者想查詢的日期：${targetDateInfo.displayDate}
+    const dateText = targetDateInfo
+        ? `使用者想查詢的日期：${targetDateInfo.displayDate}
 該日期星期：${targetDateInfo.weekday}
 時區：${targetDateInfo.timezone}
+`
+        : "";
+    const questionText = userText ? `使用者問題：${userText}\n` : "";
 
-以下是該日期對應的 summaries 檔案內容，請整理成適合 LINE 回覆的一段摘要：
+    return `${questionText}${dateText}
+以下是這次任務可用的 summaries 檔案內容。請以 LINE 可直接閱讀的格式整理，優先引用 summary 裡的具體內容；若只有一篇，也請盡量整理出多個具體重點，不要縮成只有一句核心概念：
 
 ${filePayload}${unresolvedText}`;
+}
+
+export function buildSummaryLookupAssistantPrompt() {
+    return `請使用 zh-TW 回覆。
+輸出格式必須是單一 JSON 物件：{"intent":"summary_lookup","path":"wiki/summaries/xxx.md"} 或 {"intent":"unsupported","path":""}。
+path 必須是 index 內容裡存在的 wiki/summaries/*.md 路徑。
+不要輸出 Markdown code block、不要輸出額外說明、不要輸出其他欄位。`;
+}
+
+export function buildSummaryReplyAssistantPrompt() {
+    return `請使用 zh-TW 回覆。
+輸出格式必須是單一 JSON 物件：{"reply":"你的最終摘要"}。
+不要輸出 Markdown code block、不要輸出額外說明、不要輸出其他欄位。`;
+}
+
+export function buildSummaryLookupUserPrompt(userText, indexContent) {
+    const normalizedIndex = compactText(indexContent, MAX_INDEX_CHARS);
+    return `使用者提問：
+${userText}
+
+以下是 wiki/index.md 的內容，請只從其中的 summaries 路徑挑選：
+${normalizedIndex}`;
+}
+
+function compactText(text, maxLength) {
+    const normalized = String(text || "").trim();
+    if (normalized.length <= maxLength) {
+        return normalized;
+    }
+    return `${normalized.slice(0, maxLength)}\n...(truncated)`;
 }
