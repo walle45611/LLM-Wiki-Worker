@@ -8,6 +8,8 @@
     },
     "vars": {
         "APP_TIMEZONE": "Asia/Taipei",
+        "GITHUB_OWNER": "walle4561",
+        "GITHUB_REPO": "LLM-Wiki",
         "GITHUB_REF": "main",
         "GITHUB_FILE_PATH": "wiki/log.md",
         "AI_MODEL": "@cf/openai/gpt-oss-120b",
