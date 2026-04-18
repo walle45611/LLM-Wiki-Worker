@@ -4,11 +4,13 @@ import { createHmac } from "node:crypto";
 
 import {
   app,
+  buildDateInfoFromIsoDate,
   buildDateVariants,
   clampLineText,
   extractAiText,
-  extractTodayLog,
-  getTodayInfo,
+  extractLogForDate,
+  getCurrentDateInfo,
+  parseDateResolution,
   timingSafeEqual,
   verifyLineSignature,
 } from "../src/index.js";
@@ -29,7 +31,7 @@ test("GET / returns worker status", async () => {
   assert.deepEqual(payload, { ok: true, service: "llmwikiworker" });
 });
 
-test("extractTodayLog returns dated section until next heading", () => {
+test("extractLogForDate returns dated section until next heading", () => {
   const logContent = `
 # 2026-04-19
 - Read chapter 1
@@ -39,20 +41,44 @@ test("extractTodayLog returns dated section until next heading", () => {
 - Old content
 `.trim();
 
-  const result = extractTodayLog(logContent, { year: 2026, month: 4, day: 19 });
+  const result = extractLogForDate(logContent, { year: 2026, month: 4, day: 19 });
   assert.equal(result, "# 2026-04-19\n- Read chapter 1\n- Read chapter 2");
 });
 
-test("extractTodayLog falls back to paragraphs when no heading sections exist", () => {
+test("extractLogForDate falls back to paragraphs when no heading sections exist", () => {
   const logContent = `
 2026/04/19 閱讀了 Cloudflare Workers 文件，重點是 AI binding。
 
 2026/04/18 舊紀錄。
 `.trim();
 
-  const result = extractTodayLog(logContent, { year: 2026, month: 4, day: 19 });
+  const result = extractLogForDate(logContent, { year: 2026, month: 4, day: 19 });
   assert.match(result, /Cloudflare Workers/);
   assert.doesNotMatch(result, /舊紀錄/);
+});
+
+test("parseDateResolution accepts reading lookup payload", () => {
+  const parsed = parseDateResolution('{"intent":"reading_lookup","date":"2026-04-18"}');
+
+  assert.deepEqual(parsed, {
+    intent: "reading_lookup",
+    date: "2026-04-18",
+  });
+});
+
+test("parseDateResolution rejects invalid date format", () => {
+  assert.throws(
+    () => parseDateResolution('{"intent":"reading_lookup","date":"2026/04/18"}'),
+    /invalid date format/i,
+  );
+});
+
+test("buildDateInfoFromIsoDate expands iso date into display fields", () => {
+  const info = buildDateInfoFromIsoDate("2026-04-18", "Asia/Taipei");
+
+  assert.equal(info.displayDate, "2026/04/18");
+  assert.equal(info.weekday, "星期六");
+  assert.equal(info.timezone, "Asia/Taipei");
 });
 
 test("extractAiText supports common Workers AI shapes", () => {
@@ -86,9 +112,11 @@ test("verifyLineSignature validates LINE webhook signatures", async () => {
   await assert.equal(await verifyLineSignature(body, "bad-signature", secret), false);
 });
 
-test("getTodayInfo returns timezone based date parts", () => {
-  const info = getTodayInfo("Asia/Taipei");
+test("getCurrentDateInfo returns timezone based date parts", () => {
+  const info = getCurrentDateInfo("Asia/Taipei", new Date("2026-04-19T03:00:00Z"));
 
   assert.match(info.isoDate, /^\d{4}-\d{2}-\d{2}$/);
   assert.equal(info.timezone, "Asia/Taipei");
+  assert.equal(info.displayDate, "2026/04/19");
+  assert.equal(info.weekday, "星期日");
 });

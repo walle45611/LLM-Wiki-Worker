@@ -4,6 +4,7 @@
     "private": true,
     "type": "module",
     "scripts": {
+        "set": "wrangler secret bulk -c wrangler.jsonc",
         "test": "node --test",
         "deploy": "wrangler deploy"
     },
@@ -11,11 +12,11 @@
         "hono": "^4.8.3"
     },
     "devDependencies": {
-        "node-addon-api": "^8.7.0",
         "@cloudflare/workers-types": "^4.20260317.1",
         "@types/node": "^25.5.0",
+        "node-addon-api": "^8.7.0",
         "node-gyp": "^12.2.0",
         "typescript": "^6.0.2",
-        "wrangler": "^4.78.0"
+        "wrangler": "^4.83.0"
     }
 }

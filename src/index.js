@@ -1,7 +1,12 @@
 import { Hono } from "hono";
-import { buildSummaryUserPrompt, SUMMARY_SYSTEM_PROMPT } from "./prompts.js";
+import {
+    buildDateResolutionAssistantPrompt,
+    buildDateResolutionSystemPrompt,
+    buildDateResolutionUserPrompt,
+    buildSummarySystemPrompt,
+    buildSummaryUserPrompt,
+} from "./prompts.js";
 
-const SUPPORTED_COMMAND = "我今天讀了什麼";
 const LINE_REPLY_ENDPOINT = "https://api.line.me/v2/bot/message/reply";
 const GITHUB_API_BASE = "https://api.github.com";
 
@@ -54,33 +59,32 @@ export async function handleLineEvent(event, env) {
     }
 
     const text = event.message.text.trim();
-    if (text !== SUPPORTED_COMMAND) {
-        return replyToLine(
-            event.replyToken,
-            `目前只支援指令「${SUPPORTED_COMMAND}」。`,
-            env.LINE_CHANNEL_ACCESS_TOKEN,
-        );
-    }
-
-    let todayInfo = null;
+    let currentDateInfo = null;
 
     try {
         const config = getRuntimeConfig(env);
-        todayInfo = getTodayInfo(config.timezone);
+        currentDateInfo = getCurrentDateInfo(config.timezone);
+        const targetDateInfo = await resolveTargetDate(
+            text,
+            currentDateInfo,
+            env.AI,
+            config.aiModel,
+        );
         const logContent = await fetchGithubFile(config);
-        const todayLog = extractTodayLog(logContent, todayInfo);
+        const targetLog = extractLogForDate(logContent, targetDateInfo);
 
-        if (!todayLog) {
+        if (!targetLog) {
             return replyToLine(
                 event.replyToken,
-                `今天（${todayInfo.displayDate}）沒有讀書紀錄。`,
+                `${targetDateInfo.displayDate} 沒有讀書紀錄。`,
                 env.LINE_CHANNEL_ACCESS_TOKEN,
             );
         }
 
-        const summary = await summarizeTodayLog(
-            todayLog,
-            todayInfo,
+        const summary = await summarizeReadingLog(
+            targetLog,
+            currentDateInfo,
+            targetDateInfo,
             env.AI,
             config.aiModel,
         );
@@ -92,7 +96,7 @@ export async function handleLineEvent(event, env) {
         );
     } catch (error) {
         console.error("Failed to handle LINE command", error);
-        const fallbackMessage = buildUserErrorMessage(error, todayInfo);
+        const fallbackMessage = buildUserErrorMessage(error, currentDateInfo);
         return replyToLine(
             event.replyToken,
             fallbackMessage,
@@ -209,14 +213,17 @@ export async function fetchGithubFile(config) {
     return new TextDecoder().decode(bytes);
 }
 
-export function getTodayInfo(timezone) {
-    const now = new Date();
+export function getCurrentDateInfo(timezone, now = new Date()) {
     const parts = new Intl.DateTimeFormat("en-CA", {
         timeZone: timezone,
         year: "numeric",
         month: "2-digit",
         day: "2-digit",
     }).formatToParts(now);
+    const weekday = new Intl.DateTimeFormat("zh-TW", {
+        timeZone: timezone,
+        weekday: "long",
+    }).format(now);
 
     const year = Number(parts.find((part) => part.type === "year")?.value);
     const month = Number(parts.find((part) => part.type === "month")?.value);
@@ -228,6 +235,26 @@ export function getTodayInfo(timezone) {
         day,
         isoDate: `${year}-${pad2(month)}-${pad2(day)}`,
         displayDate: `${year}/${pad2(month)}/${pad2(day)}`,
+        weekday,
+        timezone,
+    };
+}
+
+export function buildDateInfoFromIsoDate(isoDate, timezone) {
+    const [year, month, day] = isoDate.split("-").map(Number);
+    const utcDate = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    const weekday = new Intl.DateTimeFormat("zh-TW", {
+        timeZone: timezone,
+        weekday: "long",
+    }).format(utcDate);
+
+    return {
+        year,
+        month,
+        day,
+        isoDate,
+        displayDate: `${year}/${pad2(month)}/${pad2(day)}`,
+        weekday,
         timezone,
     };
 }
@@ -236,8 +263,8 @@ export function pad2(value) {
     return String(value).padStart(2, "0");
 }
 
-export function extractTodayLog(logContent, todayInfo) {
-    const variants = buildDateVariants(todayInfo);
+export function extractLogForDate(logContent, dateInfo) {
+    const variants = buildDateVariants(dateInfo);
     const lines = logContent.split(/\r?\n/);
     const blocks = [];
     const seen = new Set();
@@ -297,16 +324,16 @@ export function extractTodayLog(logContent, todayInfo) {
     return extractParagraphMatches(logContent, variants);
 }
 
-export function buildDateVariants(todayInfo) {
+export function buildDateVariants(dateInfo) {
     return [
-        `${todayInfo.year}-${pad2(todayInfo.month)}-${pad2(todayInfo.day)}`,
-        `${todayInfo.year}-${todayInfo.month}-${todayInfo.day}`,
-        `${todayInfo.year}/${pad2(todayInfo.month)}/${pad2(todayInfo.day)}`,
-        `${todayInfo.year}/${todayInfo.month}/${todayInfo.day}`,
-        `${todayInfo.year}.${pad2(todayInfo.month)}.${pad2(todayInfo.day)}`,
-        `${todayInfo.year}.${todayInfo.month}.${todayInfo.day}`,
-        `${todayInfo.year}年${todayInfo.month}月${todayInfo.day}日`,
-        `${todayInfo.year}年${pad2(todayInfo.month)}月${pad2(todayInfo.day)}日`,
+        `${dateInfo.year}-${pad2(dateInfo.month)}-${pad2(dateInfo.day)}`,
+        `${dateInfo.year}-${dateInfo.month}-${dateInfo.day}`,
+        `${dateInfo.year}/${pad2(dateInfo.month)}/${pad2(dateInfo.day)}`,
+        `${dateInfo.year}/${dateInfo.month}/${dateInfo.day}`,
+        `${dateInfo.year}.${pad2(dateInfo.month)}.${pad2(dateInfo.day)}`,
+        `${dateInfo.year}.${dateInfo.month}.${dateInfo.day}`,
+        `${dateInfo.year}年${dateInfo.month}月${dateInfo.day}日`,
+        `${dateInfo.year}年${pad2(dateInfo.month)}月${pad2(dateInfo.day)}日`,
     ];
 }
 
@@ -322,9 +349,9 @@ export function extractParagraphMatches(logContent, variants) {
     return matches.join("\n\n").trim();
 }
 
-export async function summarizeTodayLog(
-    todayLog,
-    todayInfo,
+export async function resolveTargetDate(
+    userText,
+    currentDateInfo,
     aiBinding,
     aiModel,
 ) {
@@ -336,11 +363,71 @@ export async function summarizeTodayLog(
         messages: [
             {
                 role: "system",
-                content: SUMMARY_SYSTEM_PROMPT,
+                content: buildDateResolutionSystemPrompt(currentDateInfo),
             },
             {
                 role: "user",
-                content: buildSummaryUserPrompt(todayLog, todayInfo),
+                content: buildDateResolutionUserPrompt(userText),
+            },
+            {
+                role: "assistant",
+                content: buildDateResolutionAssistantPrompt(),
+            },
+        ],
+    });
+
+    const text = extractAiText(result);
+    const parsed = parseDateResolution(text);
+
+    if (parsed.intent !== "reading_lookup" || !parsed.date) {
+        throw new Error("Unsupported reading lookup request");
+    }
+
+    return buildDateInfoFromIsoDate(parsed.date, currentDateInfo.timezone);
+}
+
+export function parseDateResolution(text) {
+    const trimmed = text.trim();
+    const jsonStart = trimmed.indexOf("{");
+    const jsonEnd = trimmed.lastIndexOf("}");
+
+    if (jsonStart === -1 || jsonEnd === -1 || jsonEnd < jsonStart) {
+        throw new Error("Workers AI returned an invalid date resolution payload");
+    }
+
+    const candidate = trimmed.slice(jsonStart, jsonEnd + 1);
+    const parsed = JSON.parse(candidate);
+
+    if (
+        parsed.intent === "reading_lookup" &&
+        !/^\d{4}-\d{2}-\d{2}$/.test(parsed.date || "")
+    ) {
+        throw new Error("Workers AI returned an invalid date format");
+    }
+
+    return parsed;
+}
+
+export async function summarizeReadingLog(
+    logContent,
+    currentDateInfo,
+    targetDateInfo,
+    aiBinding,
+    aiModel,
+) {
+    if (!aiBinding?.run) {
+        throw new Error("Workers AI binding is not configured");
+    }
+
+    const result = await aiBinding.run(aiModel, {
+        messages: [
+            {
+                role: "system",
+                content: buildSummarySystemPrompt(currentDateInfo),
+            },
+            {
+                role: "user",
+                content: buildSummaryUserPrompt(logContent, targetDateInfo),
             },
         ],
     });
@@ -403,8 +490,12 @@ export function clampLineText(text) {
     return `${normalized.slice(0, maxLength - 14)}\n\n[內容已截斷]`;
 }
 
-export function buildUserErrorMessage(error, todayInfo) {
+export function buildUserErrorMessage(error, currentDateInfo) {
     const message = error instanceof Error ? error.message : String(error);
+
+    if (message.includes("Unsupported reading lookup request")) {
+        return "請用像「今天我讀了什麼」、「昨天我讀了什麼」或「4/18 我讀了什麼」這樣的方式查詢。";
+    }
 
     if (message.includes("GitHub file not found")) {
         return "找不到閱讀紀錄檔案，請確認 GitHub 路徑設定。";
@@ -415,11 +506,11 @@ export function buildUserErrorMessage(error, todayInfo) {
     }
 
     if (message.includes("Workers AI")) {
-        return "今天的紀錄有找到，但目前暫時無法完成整理，請稍後再試。";
+        return "找到相關日期後，暫時無法完成整理，請稍後再試。";
     }
 
-    if (todayInfo) {
-        return `今天（${todayInfo.displayDate}）的整理暫時失敗，請稍後再試。`;
+    if (currentDateInfo) {
+        return `目前無法處理這次查詢。今天是 ${currentDateInfo.displayDate} ${currentDateInfo.weekday}，請稍後再試。`;
     }
 
     return "目前暫時無法處理這個指令，請稍後再試。";
