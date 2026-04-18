@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "llmwikiworker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-04-19",
+  "ai": {
+    "binding": "AI"
+  },
+  "vars": {
+    "APP_TIMEZONE": "Asia/Taipei",
+    "GITHUB_REF": "main",
+    "GITHUB_FILE_PATH": "wiki/log.md",
+    "AI_MODEL": "@cf/openai/gpt-oss-120b"
+  }
+}
