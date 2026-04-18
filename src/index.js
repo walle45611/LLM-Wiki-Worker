@@ -22,6 +22,10 @@ app.get("/", (c) => c.json({ ok: true, service: "llmwikiworker" }));
 app.post("/webhook", async (c) => {
     const bodyText = await c.req.text();
     const signature = c.req.header("x-line-signature");
+    console.log("[webhook] received", {
+        bodyLength: bodyText.length,
+        hasSignature: Boolean(signature),
+    });
 
     if (
         !(await verifyLineSignature(
@@ -30,11 +34,13 @@ app.post("/webhook", async (c) => {
             c.env.LINE_CHANNEL_SECRET,
         ))
     ) {
+        console.warn("[webhook] signature verification failed");
         return c.text("Unauthorized", 401);
     }
 
     const payload = JSON.parse(bodyText);
     const events = Array.isArray(payload.events) ? payload.events : [];
+    console.log("[webhook] parsed payload", { eventCount: events.length });
     await Promise.all(events.map((event) => handleLineEvent(event, c.env)));
 
     return c.text("OK", 200);
@@ -43,14 +49,22 @@ app.post("/webhook", async (c) => {
 export default app;
 
 export async function handleLineEvent(event, env) {
+    console.log("[line] handling event", {
+        type: event?.type,
+        messageType: event?.message?.type,
+        hasReplyToken: Boolean(event?.replyToken),
+    });
+
     if (
         !event?.replyToken ||
         event.replyToken === "00000000000000000000000000000000"
     ) {
+        console.warn("[line] skip event without valid reply token");
         return;
     }
 
     if (event.type !== "message" || event.message?.type !== "text") {
+        console.log("[line] unsupported message type");
         return replyToLine(
             event.replyToken,
             "目前只支援文字訊息。",
@@ -63,32 +77,105 @@ export async function handleLineEvent(event, env) {
 
     try {
         const config = getRuntimeConfig(env);
+        console.log("[line] runtime config loaded", {
+            githubOwner: config.githubOwner,
+            githubRepo: config.githubRepo,
+            githubRef: config.githubRef,
+            githubLogPath: config.githubLogPath,
+            githubIndexPath: config.githubIndexPath,
+            githubAgentsPath: config.githubAgentsPath,
+            githubQueryRulesPath: config.githubQueryRulesPath,
+            timezone: config.timezone,
+            aiModel: config.aiModel,
+        });
+
         currentDateInfo = getCurrentDateInfo(config.timezone);
+        console.log("[line] user query", {
+            text,
+            currentDate: currentDateInfo.isoDate,
+        });
         const targetDateInfo = await resolveTargetDate(
             text,
             currentDateInfo,
             env.AI,
             config.aiModel,
         );
-        const logContent = await fetchGithubFile(config);
-        const targetLog = extractLogForDate(logContent, targetDateInfo);
+        console.log("[line] resolved target date", {
+            isoDate: targetDateInfo.isoDate,
+            displayDate: targetDateInfo.displayDate,
+            weekday: targetDateInfo.weekday,
+        });
 
-        if (!targetLog) {
+        const [logContent, indexContent, agentsContent, queryRulesContent] =
+            await Promise.all([
+                fetchGithubFile(config, config.githubLogPath),
+                fetchGithubFile(config, config.githubIndexPath),
+                fetchGithubFile(config, config.githubAgentsPath),
+                fetchGithubFile(config, config.githubQueryRulesPath),
+            ]);
+        console.log("[line] fetched knowledge files", {
+            logLength: logContent.length,
+            indexLength: indexContent.length,
+            agentsLength: agentsContent.length,
+            queryRulesLength: queryRulesContent.length,
+        });
+
+        const resolution = resolveSummaryPathsForDate(
+            logContent,
+            indexContent,
+            targetDateInfo,
+        );
+        console.log("[line] resolved summary paths", {
+            total: resolution.summaryPaths.length,
+            unresolvedCount: resolution.unresolvedReferences.length,
+        });
+
+        if (resolution.summaryPaths.length === 0) {
             return replyToLine(
                 event.replyToken,
-                `${targetDateInfo.displayDate} 沒有讀書紀錄。`,
+                `${targetDateInfo.displayDate} 沒有可摘要的 summaries 紀錄。`,
+                env.LINE_CHANNEL_ACCESS_TOKEN,
+            );
+        }
+
+        const summarySources = await fetchSummaryFiles(
+            config,
+            resolution.summaryPaths,
+        );
+        console.log("[line] fetched summary files", {
+            requested: resolution.summaryPaths.length,
+            found: summarySources.files.length,
+            missing: summarySources.missingPaths.length,
+        });
+
+        if (summarySources.files.length === 0) {
+            return replyToLine(
+                event.replyToken,
+                `${targetDateInfo.displayDate} 有紀錄，但找不到可讀取的 summary 內容。`,
                 env.LINE_CHANNEL_ACCESS_TOKEN,
             );
         }
 
         const summary = await summarizeReadingLog(
-            targetLog,
+            summarySources.files,
             currentDateInfo,
             targetDateInfo,
             env.AI,
             config.aiModel,
+            {
+                agentsContent,
+                queryRulesContent,
+                unresolvedReferences: [
+                    ...resolution.unresolvedReferences,
+                    ...summarySources.missingPaths,
+                ],
+            },
         );
         const message = clampLineText(summary);
+        console.log("[line] summary generated", {
+            summaryLength: summary.length,
+            replyLength: message.length,
+        });
         return replyToLine(
             event.replyToken,
             message,
@@ -124,7 +211,11 @@ export function getRuntimeConfig(env) {
         githubOwner: env.GITHUB_OWNER,
         githubRepo: env.GITHUB_REPO,
         githubRef: env.GITHUB_REF || "main",
-        githubFilePath: env.GITHUB_FILE_PATH || "wiki/log.md",
+        githubLogPath: env.GITHUB_FILE_PATH || "wiki/log.md",
+        githubIndexPath: env.GITHUB_INDEX_PATH || "wiki/index.md",
+        githubAgentsPath: env.GITHUB_AGENTS_PATH || "AGENTS.md",
+        githubQueryRulesPath:
+            env.GITHUB_QUERY_RULES_PATH || "wiki/rules/query-rules.md",
         githubToken: env.GITHUB_TOKEN,
         timezone: env.APP_TIMEZONE || "Asia/Taipei",
         aiModel: env.AI_MODEL || "@cf/meta/llama-3.1-8b-instruct",
@@ -173,12 +264,18 @@ export function arrayBufferToBase64(buffer) {
     return btoa(binary);
 }
 
-export async function fetchGithubFile(config) {
-    const encodedPath = config.githubFilePath
+export async function fetchGithubFile(config, filePath) {
+    const encodedPath = filePath
         .split("/")
         .map((segment) => encodeURIComponent(segment))
         .join("/");
     const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(config.githubOwner)}/${encodeURIComponent(config.githubRepo)}/contents/${encodedPath}?ref=${encodeURIComponent(config.githubRef)}`;
+    console.log("[github] fetching file", {
+        owner: config.githubOwner,
+        repo: config.githubRepo,
+        ref: config.githubRef,
+        path: filePath,
+    });
 
     const response = await fetch(url, {
         headers: {
@@ -188,9 +285,10 @@ export async function fetchGithubFile(config) {
             "X-GitHub-Api-Version": "2022-11-28",
         },
     });
+    console.log("[github] response", { status: response.status });
 
     if (response.status === 404) {
-        throw new Error(`GitHub file not found: ${config.githubFilePath}`);
+        throw new Error(`GitHub file not found: ${filePath}`);
     }
 
     if (response.status === 401 || response.status === 403) {
@@ -210,7 +308,9 @@ export async function fetchGithubFile(config) {
     const bytes = Uint8Array.from(atob(normalized), (char) =>
         char.charCodeAt(0),
     );
-    return new TextDecoder().decode(bytes);
+    const decoded = new TextDecoder().decode(bytes);
+    console.log("[github] decoded content", { length: decoded.length });
+    return decoded;
 }
 
 export function getCurrentDateInfo(timezone, now = new Date()) {
@@ -324,6 +424,176 @@ export function extractLogForDate(logContent, dateInfo) {
     return extractParagraphMatches(logContent, variants);
 }
 
+export function extractLogBlocksForDate(logContent, dateInfo) {
+    const variants = buildDateVariants(dateInfo);
+    const lines = logContent.split(/\r?\n/);
+    const blocks = [];
+    let currentHeader = null;
+    let currentLines = [];
+
+    for (const line of lines) {
+        if (/^\s*##\s+/.test(line)) {
+            if (currentHeader && lineMatchesVariants(currentHeader, variants)) {
+                blocks.push([currentHeader, ...currentLines].join("\n").trim());
+            }
+            currentHeader = line;
+            currentLines = [];
+            continue;
+        }
+
+        if (currentHeader) {
+            currentLines.push(line);
+        }
+    }
+
+    if (currentHeader && lineMatchesVariants(currentHeader, variants)) {
+        blocks.push([currentHeader, ...currentLines].join("\n").trim());
+    }
+
+    return blocks.filter(Boolean);
+}
+
+export function parsePathList(value) {
+    const inlineCodeMatches = [...value.matchAll(/`([^`]+)`/g)].map(
+        (match) => match[1],
+    );
+    if (inlineCodeMatches.length > 0) {
+        return inlineCodeMatches;
+    }
+
+    return value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+export function extractSummaryReferencesFromLog(logContent, dateInfo) {
+    const blocks = extractLogBlocksForDate(logContent, dateInfo);
+    const references = [];
+
+    for (const block of blocks) {
+        const lines = block.split(/\r?\n/);
+        for (const line of lines) {
+            const match = line.match(/^\s*-\s*(created|updated)\s*:\s*(.+)$/i);
+            if (!match) {
+                continue;
+            }
+            references.push(...parsePathList(match[2]));
+        }
+    }
+
+    return references;
+}
+
+export function normalizeWikiPath(rawPath) {
+    const cleaned = rawPath.trim().replace(/^['"`]|['"`]$/g, "");
+    const slashNormalized = cleaned.replace(/\\/g, "/");
+    const wikiIndex = slashNormalized.indexOf("wiki/");
+    if (wikiIndex >= 0) {
+        return slashNormalized.slice(wikiIndex);
+    }
+
+    if (slashNormalized.startsWith("./")) {
+        return slashNormalized.slice(2);
+    }
+
+    if (slashNormalized.startsWith("/")) {
+        return slashNormalized.slice(1);
+    }
+
+    return slashNormalized;
+}
+
+export function parseSummaryIndex(indexContent) {
+    const lines = indexContent.split(/\r?\n/);
+    let inSummariesSection = false;
+    const mapping = new Map();
+
+    for (const line of lines) {
+        if (/^\s*##\s+Summaries\s*$/i.test(line)) {
+            inSummariesSection = true;
+            continue;
+        }
+
+        if (/^\s*##\s+/.test(line) && !/^\s*##\s+Summaries\s*$/i.test(line)) {
+            inSummariesSection = false;
+            continue;
+        }
+
+        if (!inSummariesSection) {
+            continue;
+        }
+
+        const linkMatch = line.match(/\[([^\]]+)\]\(([^)]+)\)/);
+        if (!linkMatch) {
+            continue;
+        }
+
+        const slug = linkMatch[1].trim().toLowerCase();
+        const path = normalizeWikiPath(linkMatch[2]);
+        if (path.includes("wiki/summaries/") && path.endsWith(".md")) {
+            mapping.set(slug, path);
+        }
+    }
+
+    return mapping;
+}
+
+export function resolveSummaryPathsForDate(logContent, indexContent, dateInfo) {
+    const references = extractSummaryReferencesFromLog(logContent, dateInfo);
+    const indexMap = parseSummaryIndex(indexContent);
+    const summaryPaths = new Set();
+    const unresolvedReferences = [];
+
+    for (const reference of references) {
+        const normalized = normalizeWikiPath(reference);
+        const lowered = normalized.toLowerCase();
+
+        if (lowered.startsWith("wiki/summaries/") && lowered.endsWith(".md")) {
+            summaryPaths.add(normalized);
+            continue;
+        }
+
+        const slug = lowered.replace(/\.md$/, "").split("/").pop();
+        const fromIndex = slug ? indexMap.get(slug) : null;
+        if (fromIndex) {
+            summaryPaths.add(fromIndex);
+            continue;
+        }
+
+        unresolvedReferences.push(reference);
+    }
+
+    return {
+        summaryPaths: Array.from(summaryPaths),
+        unresolvedReferences,
+    };
+}
+
+export async function fetchSummaryFiles(config, paths) {
+    const files = [];
+    const missingPaths = [];
+
+    await Promise.all(
+        paths.map(async (path) => {
+            try {
+                const content = await fetchGithubFile(config, path);
+                files.push({ path, content });
+            } catch (error) {
+                const message =
+                    error instanceof Error ? error.message : String(error);
+                if (message.includes("GitHub file not found")) {
+                    missingPaths.push(path);
+                    return;
+                }
+                throw error;
+            }
+        }),
+    );
+
+    return { files, missingPaths };
+}
+
 export function buildDateVariants(dateInfo) {
     return [
         `${dateInfo.year}-${pad2(dateInfo.month)}-${pad2(dateInfo.day)}`,
@@ -359,6 +629,11 @@ export async function resolveTargetDate(
         throw new Error("Workers AI binding is not configured");
     }
 
+    console.log("[ai] resolving target date", {
+        model: aiModel,
+        currentDate: currentDateInfo.isoDate,
+        userText,
+    });
     const result = await aiBinding.run(aiModel, {
         messages: [
             {
@@ -377,6 +652,10 @@ export async function resolveTargetDate(
     });
 
     const text = extractAiText(result);
+    console.log("[ai] date resolution raw output", {
+        length: text.length,
+        preview: text.slice(0, 200),
+    });
     const parsed = parseDateResolution(text);
 
     if (parsed.intent !== "reading_lookup" || !parsed.date) {
@@ -409,25 +688,43 @@ export function parseDateResolution(text) {
 }
 
 export async function summarizeReadingLog(
-    logContent,
+    summaryFiles,
     currentDateInfo,
     targetDateInfo,
     aiBinding,
     aiModel,
+    context,
 ) {
     if (!aiBinding?.run) {
         throw new Error("Workers AI binding is not configured");
     }
 
+    console.log("[ai] summarizing reading log", {
+        model: aiModel,
+        summaryFileCount: summaryFiles.length,
+        currentDate: currentDateInfo.isoDate,
+        targetDate: targetDateInfo.isoDate,
+        agentsLength: context.agentsContent.length,
+        queryRulesLength: context.queryRulesContent.length,
+        unresolvedCount: context.unresolvedReferences.length,
+    });
     const result = await aiBinding.run(aiModel, {
         messages: [
             {
                 role: "system",
-                content: buildSummarySystemPrompt(currentDateInfo),
+                content: buildSummarySystemPrompt(
+                    currentDateInfo,
+                    context.agentsContent,
+                    context.queryRulesContent,
+                ),
             },
             {
                 role: "user",
-                content: buildSummaryUserPrompt(logContent, targetDateInfo),
+                content: buildSummaryUserPrompt(
+                    summaryFiles,
+                    targetDateInfo,
+                    context.unresolvedReferences,
+                ),
             },
         ],
     });
@@ -437,7 +734,9 @@ export async function summarizeReadingLog(
         throw new Error("Workers AI returned an empty summary");
     }
 
-    return text.trim();
+    const trimmed = text.trim();
+    console.log("[ai] summary output", { length: trimmed.length });
+    return trimmed;
 }
 
 export function extractAiText(result) {
@@ -531,6 +830,10 @@ export async function replyToLine(replyToken, text, channelAccessToken) {
             replyToken,
             messages: [{ type: "text", text }],
         }),
+    });
+    console.log("[line] reply response", {
+        status: response.status,
+        replyLength: text.length,
     });
 
     if (!response.ok) {

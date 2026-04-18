@@ -9,8 +9,12 @@ import {
   clampLineText,
   extractAiText,
   extractLogForDate,
+  extractSummaryReferencesFromLog,
   getCurrentDateInfo,
+  normalizeWikiPath,
   parseDateResolution,
+  parseSummaryIndex,
+  resolveSummaryPathsForDate,
   timingSafeEqual,
   verifyLineSignature,
 } from "../src/index.js";
@@ -55,6 +59,81 @@ test("extractLogForDate falls back to paragraphs when no heading sections exist"
   const result = extractLogForDate(logContent, { year: 2026, month: 4, day: 19 });
   assert.match(result, /Cloudflare Workers/);
   assert.doesNotMatch(result, /舊紀錄/);
+});
+
+test("extractSummaryReferencesFromLog reads created and updated references", () => {
+  const logContent = `
+## [2026-04-18] ingest | title
+
+- created: \`wiki/summaries/alpha.md\`, \`wiki/concepts/x.md\`
+- updated: \`wiki/index.md\`, \`how-to-learn-anything-faster-using-modern-research\`
+
+## [2026-04-17] ingest | old
+- created: \`wiki/summaries/old.md\`
+`.trim();
+
+  const references = extractSummaryReferencesFromLog(logContent, {
+    year: 2026,
+    month: 4,
+    day: 18,
+  });
+
+  assert.deepEqual(references, [
+    "wiki/summaries/alpha.md",
+    "wiki/concepts/x.md",
+    "wiki/index.md",
+    "how-to-learn-anything-faster-using-modern-research",
+  ]);
+});
+
+test("parseSummaryIndex maps summary slug to wiki path", () => {
+  const indexContent = `
+# Wiki Index
+
+## Summaries
+- [alpha](/Users/demo/wiki/summaries/alpha.md): A
+
+## Concepts
+- [effective-learning](/Users/demo/wiki/concepts/effective-learning.md): B
+`.trim();
+
+  const mapping = parseSummaryIndex(indexContent);
+  assert.equal(mapping.get("alpha"), "wiki/summaries/alpha.md");
+  assert.equal(mapping.has("effective-learning"), false);
+});
+
+test("resolveSummaryPathsForDate keeps summaries and resolves slug via index", () => {
+  const logContent = `
+## [2026-04-18] ingest | title
+- created: \`wiki/summaries/alpha.md\`, \`wiki/concepts/effective-learning.md\`
+- updated: \`how-to-learn-anything-faster-using-modern-research\`, \`unknown-slug\`
+`.trim();
+  const indexContent = `
+## Summaries
+- [how-to-learn-anything-faster-using-modern-research](/Users/demo/wiki/summaries/how-to-learn-anything-faster-using-modern-research.md): A
+`.trim();
+
+  const resolved = resolveSummaryPathsForDate(logContent, indexContent, {
+    year: 2026,
+    month: 4,
+    day: 18,
+  });
+
+  assert.deepEqual(resolved.summaryPaths.sort(), [
+    "wiki/summaries/alpha.md",
+    "wiki/summaries/how-to-learn-anything-faster-using-modern-research.md",
+  ]);
+  assert.deepEqual(resolved.unresolvedReferences, [
+    "wiki/concepts/effective-learning.md",
+    "unknown-slug",
+  ]);
+});
+
+test("normalizeWikiPath converts absolute wiki paths", () => {
+  assert.equal(
+    normalizeWikiPath("/Users/name/vault/wiki/summaries/a.md"),
+    "wiki/summaries/a.md",
+  );
 });
 
 test("parseDateResolution accepts reading lookup payload", () => {
