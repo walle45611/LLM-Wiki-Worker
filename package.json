@@ -1,10 +1,21 @@
 {
-  "name": "llmwikiworker",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test": "node --test",
-    "deploy": "wrangler deploy"
-  }
+    "name": "llmwikiworker",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "test": "node --test",
+        "deploy": "wrangler deploy"
+    },
+    "dependencies": {
+        "hono": "^4.8.3"
+    },
+    "devDependencies": {
+        "node-addon-api": "^8.7.0",
+        "@cloudflare/workers-types": "^4.20260317.1",
+        "@types/node": "^25.5.0",
+        "node-gyp": "^12.2.0",
+        "typescript": "^6.0.2",
+        "wrangler": "^4.78.0"
+    }
 }

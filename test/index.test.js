@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 
 import {
+  app,
   buildDateVariants,
   clampLineText,
   extractAiText,
@@ -18,6 +19,14 @@ test("buildDateVariants includes common date formats", () => {
   assert.ok(variants.includes("2026-04-19"));
   assert.ok(variants.includes("2026/4/19"));
   assert.ok(variants.includes("2026年4月19日"));
+});
+
+test("GET / returns worker status", async () => {
+  const response = await app.request("http://localhost/");
+  const payload = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload, { ok: true, service: "llmwikiworker" });
 });
 
 test("extractTodayLog returns dated section until next heading", () => {
