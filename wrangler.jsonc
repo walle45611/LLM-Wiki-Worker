@@ -29,6 +29,6 @@
         "GITHUB_FILE_PATH": "wiki/log.md",
         "GITHUB_INDEX_PATH": "wiki/index.md",
         "GITHUB_REVIEW_RULES_PATH": "wiki/rules/review-rules.md",
-        "AI_MODEL": "@cf/openai/gpt-oss-120b",
+        "AI_MODEL": "@cf/openai/gpt-oss-20b",
     },
 }
