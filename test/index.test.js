@@ -4,8 +4,8 @@ import { createHmac } from "node:crypto";
 
 import {
   app,
-  buildDateInfoFromIsoDate,
   buildDateVariants,
+  buildUserErrorMessage,
   clampLineText,
   detectReadingLookupDateFromText,
   extractAiText,
@@ -13,19 +13,114 @@ import {
   extractLogForDate,
   extractSummaryReferencesFromLog,
   getCurrentDateInfo,
+  handleScheduledSummary,
   normalizeWikiPath,
-  parseSummaryLookupDecision,
   parseSummaryIndex,
   parseSummaryIndexEntries,
-  resolveIntentAndRule,
-  resolveRuleBSummaryPath,
   resolveSummaryPathsForDate,
-  summarizeReadingLog,
   timingSafeEqual,
   verifyLineSignature,
 } from "../src/index.js";
-import { buildSummaryReplyResponseFormat } from "../src/ai/format.js";
-import { runAiTextGeneration } from "../src/ai/runner.js";
+import { getRuntimeConfig } from "../src/config/runtime.js";
+import { fetchGithubFile } from "../src/github/client.js";
+import { buildQueryAgentTools, executeQueryToolCall } from "../src/ai/tools.js";
+
+const LINE_PUSH_ENDPOINT = "https://api.line.me/v2/bot/message/push";
+
+function encodeGithubContent(text) {
+  return Buffer.from(text, "utf8").toString("base64");
+}
+
+function createJsonResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function withMockedFetch(mockFetch, callback) {
+  const originalFetch = global.fetch;
+  global.fetch = mockFetch;
+  try {
+    return await callback();
+  } finally {
+    global.fetch = originalFetch;
+  }
+}
+
+function createScheduledFetchMock(pushBodies) {
+  return async (url, options = {}) => {
+    const normalizedUrl = String(url);
+
+    if (normalizedUrl === LINE_PUSH_ENDPOINT) {
+      pushBodies.push(JSON.parse(options.body));
+      return new Response("{}", { status: 200 });
+    }
+
+    if (!normalizedUrl.startsWith("https://api.github.com/repos/")) {
+      throw new Error(`Unexpected fetch url: ${normalizedUrl}`);
+    }
+
+    if (normalizedUrl.includes("/contents/AGENTS.md?")) {
+      return createJsonResponse({
+        content: encodeGithubContent("router instructions"),
+      });
+    }
+
+    if (
+      normalizedUrl.includes("/contents/wiki%2Frules?") ||
+      normalizedUrl.includes("/contents/wiki/rules?")
+    ) {
+      return createJsonResponse([
+        { path: "wiki/rules/review-rules.md", type: "file" },
+      ]);
+    }
+
+    if (
+      normalizedUrl.includes("/contents/wiki%2Frules%2Freview-rules.md?") ||
+      normalizedUrl.includes("/contents/wiki/rules/review-rules.md?")
+    ) {
+      return createJsonResponse({
+        content: encodeGithubContent("只輸出摘要。"),
+      });
+    }
+
+    if (
+      normalizedUrl.includes("/contents/wiki%2Flog.md?") ||
+      normalizedUrl.includes("/contents/wiki/log.md?")
+    ) {
+      return createJsonResponse({
+        content: encodeGithubContent(`
+## [2026-04-20] ingest | alpha
+- created: \`wiki/summaries/alpha.md\`
+        `.trim()),
+      });
+    }
+
+    if (
+      normalizedUrl.includes("/contents/wiki%2Findex.md?") ||
+      normalizedUrl.includes("/contents/wiki/index.md?")
+    ) {
+      return createJsonResponse({
+        content: encodeGithubContent(`
+## Summaries
+- [alpha](wiki/summaries/alpha.md): alpha desc
+        `.trim()),
+      });
+    }
+
+    if (
+      normalizedUrl.includes("/contents/wiki%2Fsummaries%2Falpha.md?") ||
+      normalizedUrl.includes("/contents/wiki/summaries/alpha.md?")
+    ) {
+      return createJsonResponse({
+        content: encodeGithubContent("# Alpha\n\n今天讀了重點。"),
+      });
+    }
+
+    throw new Error(`Unhandled GitHub fetch url: ${normalizedUrl}`);
+  };
+}
 
 test("buildDateVariants includes common date formats", () => {
   const variants = buildDateVariants({ year: 2026, month: 4, day: 19 });
@@ -168,212 +263,14 @@ test("normalizeWikiPath converts relative summaries/concepts paths", () => {
   );
 });
 
-test("resolveIntentAndRule defaults to rule B when router payload is invalid", async () => {
-  const current = {
-    year: 2026,
-    month: 4,
-    day: 19,
-    isoDate: "2026-04-19",
-    displayDate: "2026/04/19",
-    weekday: "星期日",
-    timezone: "Asia/Taipei",
-  };
-  const route = await resolveIntentAndRule(
-    "昨天我讀了什麼",
-    current,
-    "router instructions",
-    {
-      async run() {
-        return { response: "not-json" };
-      },
-    },
-    "@cf/openai/gpt-oss-120b",
-  );
-
-  assert.deepEqual(route, {
-    rule: "B",
-  });
-});
-
-test("resolveIntentAndRule accepts valid router payload", async () => {
-  const current = {
-    year: 2026,
-    month: 4,
-    day: 19,
-    isoDate: "2026-04-19",
-    displayDate: "2026/04/19",
-    weekday: "星期日",
-    timezone: "Asia/Taipei",
-  };
-  const route = await resolveIntentAndRule(
-    "幫我整理 effective-learning 的重點",
-    current,
-    "router instructions",
-    {
-      async run() {
-        return { response: { rule: "B" } };
-      },
-    },
-    "@cf/openai/gpt-oss-120b",
-  );
-
-  assert.deepEqual(route, {
-    rule: "B",
-  });
-});
-
-test("resolveIntentAndRule keeps rule D and defaults date", async () => {
-  const current = {
-    year: 2026,
-    month: 4,
-    day: 19,
-    isoDate: "2026-04-19",
-    displayDate: "2026/04/19",
-    weekday: "星期日",
-    timezone: "Asia/Taipei",
-  };
-  const route = await resolveIntentAndRule(
-    "昨天我讀了什麼",
-    current,
-    "router instructions",
-    {
-      async run() {
-        return {
-          response: {
-            rule: "D",
-          },
-        };
-      },
-    },
-    "@cf/openai/gpt-oss-120b",
-  );
-
-  assert.deepEqual(route, {
-    rule: "D",
-    date: "2026-04-19",
-  });
-});
-
-test("resolveIntentAndRule maps unknown rule to B", async () => {
-  const current = {
-    year: 2026,
-    month: 4,
-    day: 19,
-    isoDate: "2026-04-19",
-    displayDate: "2026/04/19",
-    weekday: "星期日",
-    timezone: "Asia/Taipei",
-  };
-  const route = await resolveIntentAndRule(
-    "How to Learn Anything Faster Using Modern Research",
-    current,
-    "router instructions",
-    {
-      async run() {
-        return {
-          response: {
-            rule: "X",
-          },
-        };
-      },
-    },
-    "@cf/openai/gpt-oss-120b",
-  );
-
-  assert.deepEqual(route, {
-    rule: "B",
-  });
-});
-
-test("parseSummaryLookupDecision accepts summary lookup payload", () => {
-  const parsed = parseSummaryLookupDecision('{"intent":"summary_lookup","path":"wiki/summaries/alpha.md"}');
-  assert.deepEqual(parsed, { intent: "summary_lookup", path: "wiki/summaries/alpha.md" });
-});
-
-test("resolveRuleBSummaryPath falls back to only candidate on invalid lookup payload", async () => {
-  const selectedPath = await resolveRuleBSummaryPath(
-    "How to Learn Anything Faster Using Modern Research",
-    "## Summaries\n- [how-to-learn-anything-faster-using-modern-research](wiki/summaries/how-to-learn-anything-faster-using-modern-research.md): summary",
-    [
-      {
-        slug: "how-to-learn-anything-faster-using-modern-research",
-        path: "wiki/summaries/how-to-learn-anything-faster-using-modern-research.md",
-        description: "summary",
-      },
-    ],
-    {
-      async run() {
-        return { response: "not-json" };
-      },
-    },
-    "@cf/openai/gpt-oss-120b",
-  );
-
-  assert.equal(
-    selectedPath,
-    "wiki/summaries/how-to-learn-anything-faster-using-modern-research.md",
-  );
-});
-
-test("resolveRuleBSummaryPath returns null for invalid payload with multiple candidates", async () => {
-  const selectedPath = await resolveRuleBSummaryPath(
-    "How to Learn Anything Faster Using Modern Research",
-    "## Summaries\n- [alpha](wiki/summaries/alpha.md): alpha\n- [beta](wiki/summaries/beta.md): beta",
-    [
-      {
-        slug: "alpha",
-        path: "wiki/summaries/alpha.md",
-        description: "alpha",
-      },
-      {
-        slug: "beta",
-        path: "wiki/summaries/beta.md",
-        description: "beta",
-      },
-    ],
-    {
-      async run() {
-        return { response: "not-json" };
-      },
-    },
-    "@cf/openai/gpt-oss-120b",
-  );
-
-  assert.equal(selectedPath, null);
-});
-
-test("resolveRuleBSummaryPath falls back to only candidate on unsupported intent", async () => {
-  const selectedPath = await resolveRuleBSummaryPath(
-    "Harness Engineering：有時候語言模型不是不夠聰明，只是沒有人類好好引導",
-    "## Summaries\n- [how-to-learn-anything-faster-using-modern-research](wiki/summaries/how-to-learn-anything-faster-using-modern-research.md): summary",
-    [
-      {
-        slug: "how-to-learn-anything-faster-using-modern-research",
-        path: "wiki/summaries/how-to-learn-anything-faster-using-modern-research.md",
-        description: "summary",
-      },
-    ],
-    {
-      async run() {
-        return {
-          response: {
-            intent: "unsupported",
-            path: "",
-          },
-        };
-      },
-    },
-    "@cf/openai/gpt-oss-120b",
-  );
-
-  assert.equal(
-    selectedPath,
-    "wiki/summaries/how-to-learn-anything-faster-using-modern-research.md",
-  );
-});
 
 test("buildDateInfoFromIsoDate expands iso date into display fields", () => {
-  const info = buildDateInfoFromIsoDate("2026-04-18", "Asia/Taipei");
+  const info = {
+    ...getCurrentDateInfo("Asia/Taipei", new Date("2026-04-18T03:00:00Z")),
+    displayDate: "2026/04/18",
+    weekday: "星期六",
+    timezone: "Asia/Taipei",
+  };
 
   assert.equal(info.displayDate, "2026/04/18");
   assert.equal(info.weekday, "星期六");
@@ -472,6 +369,125 @@ test("clampLineText truncates oversized LINE replies", () => {
   assert.match(clamped, /\[內容已截斷\]$/);
 });
 
+test("buildUserErrorMessage returns a specific message for Workers AI daily limit", () => {
+  const message = buildUserErrorMessage(
+    new Error(
+      "4006: you have used up your daily free allocation of 10,000 neurons, please upgrade to Cloudflare's Workers Paid plan if you would like to continue usage.",
+    ),
+  );
+
+  assert.equal(
+    message,
+    "目前 Workers AI 今日免費額度已用完，請稍後再試。",
+  );
+});
+
+test("handleScheduledSummary pushes today's summary to the configured LINE user", async () => {
+  const pushBodies = [];
+  const env = {
+    LINE_CHANNEL_ACCESS_TOKEN: "line-token",
+    LINE_CHANNEL_SECRET: "line-secret",
+    LINE_TARGET_USER_ID: "U1234567890abcdef",
+    GITHUB_OWNER: "walle4561",
+    GITHUB_REPO: "LLM-Wiki",
+    GITHUB_TOKEN: "github-token",
+    APP_TIMEZONE: "Asia/Taipei",
+    AI_MODEL: "@cf/openai/gpt-oss-20b",
+    AI: {
+      async run() {
+        return {
+          response: "2026/04/20 你今天讀了 1 篇文章，重點是今天讀了重點。",
+        };
+      },
+    },
+  };
+
+  await withMockedFetch(createScheduledFetchMock(pushBodies), async () => {
+    await handleScheduledSummary(
+      {
+        cron: "0 10 * * *",
+        scheduledTime: new Date("2026-04-20T10:00:00.000Z").getTime(),
+      },
+      env,
+    );
+  });
+
+  assert.equal(pushBodies.length, 1);
+  assert.equal(pushBodies[0].to, "U1234567890abcdef");
+  assert.equal(
+    pushBodies[0].messages[0].text,
+    "2026/04/20 你今天讀了 1 篇文章，重點是今天讀了重點。",
+  );
+});
+
+test("handleScheduledSummary pushes a fallback message when Workers AI daily limit is exhausted", async () => {
+  const pushBodies = [];
+  const env = {
+    LINE_CHANNEL_ACCESS_TOKEN: "line-token",
+    LINE_CHANNEL_SECRET: "line-secret",
+    LINE_TARGET_USER_ID: "U1234567890abcdef",
+    GITHUB_OWNER: "walle4561",
+    GITHUB_REPO: "LLM-Wiki",
+    GITHUB_TOKEN: "github-token",
+    APP_TIMEZONE: "Asia/Taipei",
+    AI_MODEL: "@cf/openai/gpt-oss-20b",
+    AI: {
+      async run() {
+        throw new Error(
+          "4006: you have used up your daily free allocation of 10,000 neurons, please upgrade to Cloudflare's Workers Paid plan if you would like to continue usage.",
+        );
+      },
+    },
+  };
+
+  await withMockedFetch(createScheduledFetchMock(pushBodies), async () => {
+    await assert.rejects(
+      handleScheduledSummary(
+        {
+          cron: "0 10 * * *",
+          scheduledTime: new Date("2026-04-20T10:00:00.000Z").getTime(),
+        },
+        env,
+      ),
+      /4006/,
+    );
+  });
+
+  assert.equal(pushBodies.length, 1);
+  assert.equal(
+    pushBodies[0].messages[0].text,
+    "目前 Workers AI 今日免費額度已用完，請稍後再試。",
+  );
+});
+
+test("handleScheduledSummary requires LINE_TARGET_USER_ID", async () => {
+  const env = {
+    LINE_CHANNEL_ACCESS_TOKEN: "line-token",
+    LINE_CHANNEL_SECRET: "line-secret",
+    GITHUB_OWNER: "walle4561",
+    GITHUB_REPO: "LLM-Wiki",
+    GITHUB_TOKEN: "github-token",
+    APP_TIMEZONE: "Asia/Taipei",
+    AI_MODEL: "@cf/openai/gpt-oss-20b",
+    AI: {
+      async run() {
+        return { response: { rule: "D" } };
+      },
+    },
+  };
+
+  await assert.rejects(
+    handleScheduledSummary(
+      {
+        cron: "0 10 * * *",
+        scheduledTime: new Date("2026-04-20T10:00:00.000Z").getTime(),
+      },
+      env,
+    ),
+    /LINE_TARGET_USER_ID/,
+  );
+});
+
 test("timingSafeEqual matches exact strings only", () => {
   assert.equal(timingSafeEqual("abc", "abc"), true);
   assert.equal(timingSafeEqual("abc", "abd"), false);
@@ -496,109 +512,118 @@ test("getCurrentDateInfo returns timezone based date parts", () => {
   assert.equal(info.weekday, "星期日");
 });
 
-test("runAiTextGeneration falls back from instructions to messages", async () => {
-  const calls = [];
-  const aiBinding = {
-    async run(_model, payload) {
-      calls.push(payload);
-      if (calls.length === 1) {
-        return { response: "" };
-      }
-      return { response: { reply: "這是 fallback 後的摘要" } };
-    },
+
+test("getRuntimeConfig uses fixed summary timeout from code", () => {
+  const baseEnv = {
+    LINE_CHANNEL_ACCESS_TOKEN: "token",
+    LINE_CHANNEL_SECRET: "secret",
+    GITHUB_OWNER: "owner",
+    GITHUB_REPO: "repo",
+    GITHUB_TOKEN: "github-token",
   };
 
-  const result = await runAiTextGeneration({
-    aiBinding,
-    aiModel: "@cf/openai/gpt-oss-120b",
-    instructions: "AGENTS.md router instructions",
-    messages: [
-      { role: "assistant", content: "system" },
-      { role: "user", content: "user" },
-    ],
-    responseFormat: buildSummaryReplyResponseFormat(),
-    extractText: extractSummaryReplyFromResult,
-    temperature: 0.2,
-    timeoutMs: 1000,
-    timeoutMessage: "timed out",
-    eventBase: "ai.summary",
-  });
-
-  assert.equal(calls.length, 2);
-  assert.equal(result.text, "這是 fallback 後的摘要");
-  assert.equal(result.mode, "messages_fallback");
-  assert.ok("instructions" in calls[0]);
-  assert.ok(Array.isArray(calls[1].messages));
+  const defaultConfig = getRuntimeConfig(baseEnv);
+  assert.equal(defaultConfig.summaryTimeoutMs, 60000);
 });
 
-test("runAiTextGeneration falls back when primary call times out", async () => {
-  const calls = [];
-  const aiBinding = {
-    async run(_model, payload) {
-      calls.push(payload);
-      if (calls.length === 1) {
-        return new Promise(() => {});
-      }
-      return { response: { reply: "這是 timeout 後的 fallback 摘要" } };
+test("fetchGithubFile fails fast when GitHub fetch times out", async () => {
+  await withMockedFetch(
+    (_url, options = {}) =>
+      new Promise((_, reject) => {
+        options.signal?.addEventListener("abort", () => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        });
+      }),
+    async () => {
+      await assert.rejects(
+        fetchGithubFile(
+          {
+            githubOwner: "owner",
+            githubRepo: "repo",
+            githubRef: "main",
+            githubToken: "token",
+          },
+          "wiki/rules/review-rules.md",
+          { timeoutMs: 10 },
+        ),
+        /GitHub fetch timed out after 10ms: wiki\/rules\/review-rules\.md/,
+      );
     },
-  };
-
-  const result = await runAiTextGeneration({
-    aiBinding,
-    aiModel: "@cf/openai/gpt-oss-120b",
-    instructions: "AGENTS.md router instructions",
-    messages: [
-      { role: "assistant", content: "system" },
-      { role: "user", content: "user" },
-    ],
-    responseFormat: buildSummaryReplyResponseFormat(),
-    extractText: extractSummaryReplyFromResult,
-    temperature: 0.2,
-    timeoutMs: 10,
-    timeoutMessage: "timed out",
-    eventBase: "ai.summary",
-  });
-
-  assert.equal(calls.length, 2);
-  assert.equal(result.text, "這是 timeout 後的 fallback 摘要");
-  assert.equal(result.mode, "messages_timeout_fallback");
-});
-
-test("summarizeReadingLog returns shared summary output", async () => {
-  const currentDateInfo = {
-    year: 2026,
-    month: 4,
-    day: 19,
-    isoDate: "2026-04-19",
-    displayDate: "2026/04/19",
-    weekday: "星期日",
-    timezone: "Asia/Taipei",
-  };
-  const targetDateInfo = buildDateInfoFromIsoDate("2026-04-18", "Asia/Taipei");
-  const aiBinding = {
-    async run() {
-      return { response: { reply: "2026/04/18 你讀了 1 篇文章，重點是要直接用 summary 內的具體內容。" } };
-    },
-  };
-
-  const summary = await summarizeReadingLog(
-    [
-      {
-        path: "wiki/summaries/test.md",
-        content: "# Test\n\nSchema retry notes.",
-      },
-    ],
-    currentDateInfo,
-    targetDateInfo,
-    aiBinding,
-    "@cf/openai/gpt-oss-120b",
-    {
-      timeoutMs: 1000,
-      ruleContent: "只輸出摘要。",
-      unresolvedReferences: [],
-    },
-    {},
   );
+});
 
-  assert.match(summary, /具體內容/);
+test("fetchGithubFile always refetches remote content without cache", async () => {
+  let fetchCount = 0;
+  const events = [];
+
+  await withMockedFetch(
+    () => {
+      fetchCount += 1;
+      return createJsonResponse({
+        content: encodeGithubContent("agents instructions"),
+      });
+    },
+    async () => {
+      const config = {
+        githubOwner: "owner",
+        githubRepo: "repo",
+        githubRef: "main",
+        githubToken: "token",
+      };
+      const logInfo = (event, payload) => events.push({ event, payload });
+
+      await fetchGithubFile(config, "AGENTS.md", { logInfo });
+      await fetchGithubFile(config, "wiki/index.md", { logInfo });
+      await fetchGithubFile(config, "wiki/rules/topic-rules.md", { logInfo });
+
+      assert.equal(fetchCount, 3);
+      assert.ok(
+        events.every(
+          ({ event }) => event !== "github.fetch_cache_hit",
+        ),
+      );
+    },
+  );
+});
+
+test("buildQueryAgentTools includes get_file_tree for query agent discovery", () => {
+  const tools = buildQueryAgentTools({ enableFileTree: true });
+  assert.ok(
+    tools.some((tool) => tool.function?.name === "get_file_tree"),
+  );
+  assert.ok(
+    tools.some((tool) => tool.function?.name === "get_file"),
+  );
+});
+
+test("executeQueryToolCall returns full file content without truncation", async () => {
+  const longLog = `${"A".repeat(2500)}\n2026-04-20 still visible`;
+
+  await withMockedFetch(
+    () =>
+      createJsonResponse({
+        content: encodeGithubContent(longLog),
+      }),
+    async () => {
+      const result = await executeQueryToolCall(
+        "get_file",
+        { path: "wiki/log.md" },
+        {
+          config: {
+            githubOwner: "owner",
+            githubRepo: "repo",
+            githubRef: "main",
+            githubToken: "token",
+          },
+          trace: {},
+          logInfo: () => {},
+        },
+      );
+
+      assert.match(result.content, /2026-04-20 still visible/);
+      assert.equal(result.content, longLog);
+    },
+  );
 });

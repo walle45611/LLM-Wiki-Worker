@@ -11,6 +11,8 @@ import { extractAiText, extractSummaryReplyFromResult } from "../ai/response.js"
 import { logInfo, logWarn, toPreview } from "../logger.js";
 
 const DEFAULT_MAX_TOKENS = 2048;
+const QUERY_AGENT_TIMEOUT_REPLY =
+    "目前整理流程逾時，請稍後再試。";
 
 export async function runQueryAgent({
     userText,
@@ -22,13 +24,12 @@ export async function runQueryAgent({
     timeoutMs,
 }) {
     assertAiBindingConfigured(aiBinding);
-    const tools = buildQueryAgentTools({ enableFileTree: false });
+    const tools = buildQueryAgentTools({ enableFileTree: true });
     const instructions = String(agentPrompt || "").trim();
     const systemPrompt = `【可用工具】
 1) get_file：讀取單一檔案內容。參數：path（必填）
+2) get_file_tree：列出指定路徑下的檔案與資料夾。參數：base_path（必填）、max_depth（選填）
 
-【任務】
-你只能根據 wiki/ 內實際讀到的內容回答使用者問題，不得引用或推論 wiki/ 以外的資訊，也不得讀取 raw/。
 
 【強制流程】
 1) 第一個工具呼叫必須是：
@@ -41,26 +42,35 @@ export async function runQueryAgent({
    - 一個與問題直接相關的 wiki 檔案
 
 【工具規則】
-1) 只能使用 get_file 讀取檔案
+1) 你可以使用 get_file 讀取檔案，也可以在需要確認路徑時使用 get_file_tree
 2) 不得自行猜測檔名或路徑（例如自行假設 wiki/reading-log.md 存在）
-3) 後續只能讀取下列來源中明確出現的 wiki/ 路徑：
+3) 後續只能讀取下列來源中明確出現的 wiki/ 或 raw/ 路徑：
    - 使用者 prompt 明確提到的路徑
    - router-rules.md 明確指出的路徑
    - 已讀 rule 明確指出的路徑
-   - 已讀 wiki 檔案內明確列出的路徑
-4) 若下一個檔案路徑在已讀內容中沒有被明確指出，必須直接說明路徑資訊不足，不得自行臆測
-5) 若某個檔案路徑未曾在使用者 prompt、router-rules.md、已讀 rule、或已讀 wiki 檔案中明確出現，禁止呼叫 get_file 讀取該路徑
+   - 已讀檔案內明確列出的路徑
+   - get_file_tree 列出的路徑
+4) 若下一個檔案路徑在已讀內容中沒有被明確指出，必須先用 get_file_tree 確認，或直接說明路徑資訊不足，不得自行臆測
+5) 若某個檔案路徑未曾在使用者 prompt、router-rules.md、已讀 rule、已讀檔案、或 get_file_tree 結果中明確出現，禁止呼叫 get_file 讀取該路徑
 
 【回答規則】
 1) 只根據實際讀到的 wiki/ 內容回答
 2) 若資料不足、檔案不存在、或無法依規則完成判斷，必須直接說明，不得猜測
 
 【輸出規則】
-1) 最終輸出要適合 LINE 或手機通訊軟體閱讀
+1) 最終輸出只能是適合 LINE 或手機通訊軟體閱讀的純文字訊息
 2) 保持精簡、清楚、好掃讀，避免文字牆
 3) 可適度使用 emoji，但不要過量
-4) 不要使用 Markdown 格式，例如 Markdown 標題語法（#、##）或分隔線（---）
-5) 段落名稱改用【】表示，例如【4/18 知識庫回顧】`;
+4) 段落名稱一律改用【】表示，例如【4/18 知識庫回顧】
+5) 禁止使用任何 Markdown 格式或樣式符號，包括但不限於：#、##、###、**粗體**、__粗體__、*斜體*、_斜體_、清單核取方塊、程式碼區塊標記、---、***、___
+6) 禁止輸出任何結尾寒暄、邀請、延伸提問或客服式收尾，例如：
+   - 如果您想更深入了解任何一篇，隨時告訴我！
+   - 如果你想看更多，我可以再幫你整理
+   - 有需要的話再跟我說
+7) 結尾必須直接停在內容本身，不得附加多餘一句總結、提醒或邀請
+8) 在輸出最終答案前，必須先自行逐項檢查格式是否合規
+9) 若檢查後仍包含 #、##、###、**、__、*、_、---、***、___、Markdown 清單格式、結尾語、邀請語、或任何不屬於內容本身的補充句，禁止直接輸出，必須先改寫到完全移除後才能結束
+10) 只有在確認最終文字完全不包含上述違規內容時，才能輸出最終答案`;
     const messages = [
         {
             role: "assistant",
@@ -86,7 +96,6 @@ export async function runQueryAgent({
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
         model: aiModel,
-        instructionLength: instructions.length,
         promptLength: systemPrompt.length,
         userTextPreview: toPreview(userText),
         maxRounds,
@@ -105,11 +114,9 @@ export async function runQueryAgent({
             eventIndex: trace.eventIndex,
             round: round + 1,
             model: aiModel,
-            instructionLength: instructions.length,
             instructionPreview: previewWithLimit(instructions, 1600),
             promptLength: systemPrompt.length,
             promptPreview: previewWithLimit(systemPrompt, 1600),
-            inputMessages: buildInputMessageLog(conversation),
             remainingMs,
         });
 
@@ -127,7 +134,6 @@ export async function runQueryAgent({
                 "Workers AI query agent timed out",
             );
         } catch (error) {
-            const diagnostics = extractAiErrorDiagnostics(error);
             logWarn("ai.query_agent_round_failed", {
                 requestId: trace.requestId,
                 eventIndex: trace.eventIndex,
@@ -136,10 +142,6 @@ export async function runQueryAgent({
                 errorMessage: error instanceof Error ? error.message : String(error),
                 remainingMs,
                 elapsedMs: Date.now() - startedAt,
-                aiStatusCode: diagnostics.statusCode,
-                aiResponseBodyPreview: diagnostics.responseBodyPreview,
-                abortReason: diagnostics.abortReason,
-                timeoutSource: diagnostics.timeoutSource,
             });
             if (isTimeoutLikeError(error)) {
                 logInfo("ai.query_agent_loop_ended", {
@@ -149,7 +151,7 @@ export async function runQueryAgent({
                     round: round + 1,
                     elapsedMs: Date.now() - startedAt,
                 });
-                return buildFastFallbackReply(userText);
+                return QUERY_AGENT_TIMEOUT_REPLY;
             }
             logWarn("ai.query_agent_loop_ended", {
                 requestId: trace.requestId,
@@ -169,10 +171,7 @@ export async function runQueryAgent({
             outputTextPreview: previewWithLimit(extractAiText(result), 1600),
         });
 
-        const toolCalls = normalizeToolCallsForRound(
-            extractToolCalls(result),
-            round,
-        );
+        const toolCalls = extractToolCalls(result);
         logInfo("ai.query_agent_round_completed", {
             requestId: trace.requestId,
             eventIndex: trace.eventIndex,
@@ -230,8 +229,8 @@ export async function runQueryAgent({
                 eventIndex: trace.eventIndex,
                 round: round + 1,
                 name,
-            argsPreview: previewWithLimit(JSON.stringify(args), 1200),
-        });
+                argsPreview: previewWithLimit(JSON.stringify(args), 1200),
+            });
             let toolResult = null;
             try {
                 toolResult = await executeQueryToolCall(
@@ -249,7 +248,7 @@ export async function runQueryAgent({
                     errorMessage: error instanceof Error ? error.message : String(error),
                 });
                 if (isTimeoutLikeError(error)) {
-                    return buildFastFallbackReply(userText);
+                    return QUERY_AGENT_TIMEOUT_REPLY;
                 }
                 toolResult = {
                     error: error instanceof Error ? error.message : String(error),
@@ -288,7 +287,7 @@ export async function runQueryAgent({
         round: maxRounds,
         elapsedMs: Date.now() - startedAt,
     });
-    return buildFastFallbackReply(userText);
+    return QUERY_AGENT_TIMEOUT_REPLY;
 }
 
 function extractQueryAgentReply(result) {
@@ -325,82 +324,9 @@ async function runAiWithTimeout(promise, timeoutMs, timeoutMessage) {
     });
 }
 
-function buildFastFallbackReply(userText) {
-    const text = String(userText || "");
-    if (/\d{1,2}\/\d{1,2}|今天|昨日|昨天|前天|\d{4}-\d{2}-\d{2}/.test(text)) {
-        return "我有收到日期查詢，但目前整理流程逾時，請再試一次，或改問：今天讀了什麼。";
-    }
-    return "我有收到你的查詢，但目前整理流程逾時，請稍後再試。";
-}
-
 function isTimeoutLikeError(error) {
     const message = error instanceof Error ? error.message : String(error);
     return /timed out|timeout|AbortError/i.test(message);
-}
-
-function extractAiErrorDiagnostics(error) {
-    const fallback = {
-        statusCode: 0,
-        responseBodyPreview: "",
-        abortReason: "",
-        timeoutSource: "",
-    };
-    if (!error || typeof error !== "object") {
-        return fallback;
-    }
-
-    const statusCode =
-        normalizeStatusCode(error.statusCode) ||
-        normalizeStatusCode(error.status) ||
-        normalizeStatusCode(error.response?.status) ||
-        normalizeStatusCode(error.cause?.status) ||
-        0;
-
-    const responseBody =
-        extractErrorBody(error.body) ||
-        extractErrorBody(error.responseBody) ||
-        extractErrorBody(error.response?.body) ||
-        extractErrorBody(error.response?.data) ||
-        extractErrorBody(error.cause?.body) ||
-        extractErrorBody(error.cause?.response?.body) ||
-        "";
-
-    return {
-        statusCode,
-        responseBodyPreview: previewWithLimit(responseBody, 1600),
-        abortReason: String(error.abortReason || error.cause?.abortReason || ""),
-        timeoutSource: String(
-            error.timeoutSource || error.cause?.timeoutSource || "",
-        ),
-    };
-}
-
-function normalizeStatusCode(value) {
-    const numeric = Number(value);
-    return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
-}
-
-function extractErrorBody(value) {
-    if (!value) {
-        return "";
-    }
-    if (typeof value === "string") {
-        return value;
-    }
-    try {
-        return JSON.stringify(value);
-    } catch {
-        return String(value);
-    }
-}
-
-function buildInputMessageLog(messages) {
-    return (messages || []).map((message, index) => ({
-        index,
-        role: message?.role || "",
-        contentLength: String(message?.content || "").length,
-        contentPreview: previewWithLimit(message?.content, 1600),
-    }));
 }
 
 function previewWithLimit(text, maxLength) {
@@ -409,29 +335,4 @@ function previewWithLimit(text, maxLength) {
         return normalized;
     }
     return `${normalized.slice(0, maxLength)}...`;
-}
-
-function normalizeToolCallsForRound(toolCalls, round) {
-    if (round !== 0 || !Array.isArray(toolCalls) || toolCalls.length === 0) {
-        return toolCalls;
-    }
-
-    const firstCall = toolCalls[0];
-    const name = getToolCallName(firstCall);
-    const args = parseToolCallArguments(firstCall);
-    const path = String(args?.path || "").trim();
-
-    if (name === "get_file" && path === "wiki/rules/router-rules.md") {
-        return toolCalls;
-    }
-
-    return [
-        {
-            ...firstCall,
-            function: {
-                name: "get_file",
-                arguments: JSON.stringify({ path: "wiki/rules/router-rules.md" }),
-            },
-        },
-    ];
 }

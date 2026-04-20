@@ -1,6 +1,6 @@
 # LLMWikiWorker
 
-這個專案會把 LINE webhook 指向 Cloudflare Worker，支援兩種查詢：
+這個專案會把 LINE webhook 指向 Cloudflare Worker，並在每天晚上 6 點自動推送當日閱讀摘要給固定的個人 LINE 使用者。互動查詢支援兩種模式：
 - 日期型：`我今天讀了什麼`、`昨天我讀了什麼`、`4/18 我讀了什麼`
 - 主題型：輸入一句自然語言問題，AI 會用 `wiki/index.md` 找最相關 summary 再整理回覆
 
@@ -15,6 +15,7 @@
 7. Worker 以精簡 prompt + summaries 內容呼叫 Workers AI 產生摘要
 8. Worker 用 LINE reply message 回傳整理結果
 9. 若不是日期型查詢，Worker 會改走主題型查詢流程：AI 先從 index 候選中挑出最相關 summary，再整理格式後回覆
+10. Cloudflare `scheduled` trigger 會在每天 `Asia/Taipei` 18:00 自動執行一次「今天讀了什麼」，並用 LINE push message 發送給固定 `LINE_TARGET_USER_ID`
 
 ## Required Cloudflare Secrets
 
@@ -31,9 +32,15 @@
 - `GITHUB_INDEX_PATH`，預設 `wiki/index.md`
 - `GITHUB_REVIEW_RULES_PATH`，預設 `wiki/rules/review-rules.md`
 - `APP_TIMEZONE`，預設 `Asia/Taipei`
-- `AI_MODEL`，預設 `@cf/meta/llama-3.1-8b-instruct`
+- `LINE_TARGET_USER_ID`，每日 18:00 自動推播的固定 LINE 使用者 ID
+- `AI_MODEL`，預設 `@cf/openai/gpt-oss-20b`
 - `SUMMARY_AI_MODEL`（可選），預設同 `AI_MODEL`
-- `SUMMARY_TIMEOUT_MS`（可選），預設 `12000`（可不設定）
+
+## Scheduled Trigger
+
+- `wrangler.jsonc` 內建 cron：`0 10 * * *`
+- 這個 cron 以 UTC 計算，對應 `Asia/Taipei` 每天 18:00
+- 排程推播只支援單一固定 LINE 使用者，不支援群組，也不支援多使用者訂閱管理
 
 ## Local Commands
 
