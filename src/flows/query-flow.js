@@ -41,7 +41,7 @@ export async function buildLineQueryReply({
         userPrompt,
         agentPrompt,
         aiBinding: env.AI,
-        aiModel: config.summaryAiModel,
+        aiModel: config.aiModel,
         config,
         trace,
         timeoutMs,
@@ -73,7 +73,8 @@ async function loadAgentPrompt(config, trace, eventPrefix) {
         logInfo(`${eventPrefix}.agents_load_failed`, {
             requestId: trace.requestId,
             eventIndex: trace.eventIndex,
-            errorMessage: error instanceof Error ? error.message : String(error),
+            errorMessage:
+                error instanceof Error ? error.message : String(error),
         });
         return DEFAULT_AGENT_PROMPT;
     }

@@ -29,10 +29,7 @@ export function getRuntimeConfig(env) {
         githubToken: env.GITHUB_TOKEN,
         timezone: env.APP_TIMEZONE || "Asia/Taipei",
         lineTargetUserId: env.LINE_TARGET_USER_ID || "",
-        summaryAiModel:
-            env.SUMMARY_AI_MODEL ||
-            env.AI_MODEL ||
-            DEFAULT_AI_MODEL,
+        aiModel: env.AI_MODEL || DEFAULT_AI_MODEL,
         eventTimeoutMs: EVENT_TIMEOUT_MS,
     };
 }

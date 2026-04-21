@@ -170,7 +170,7 @@ export async function handleLineEvent(event, env, trace = {}) {
             githubRepo: config.githubRepo,
             githubRef: config.githubRef,
             timezone: config.timezone,
-            summaryAiModel: config.summaryAiModel,
+            aiModel: config.aiModel,
             eventTimeoutMs: config.eventTimeoutMs,
         });
         await env.LLM_WIKI_QUEUE.send({
@@ -354,7 +354,7 @@ export async function handleScheduledSummary(controller, env) {
             githubRepo: config.githubRepo,
             githubRef: config.githubRef,
             timezone: config.timezone,
-            summaryAiModel: config.summaryAiModel,
+            aiModel: config.aiModel,
             eventTimeoutMs: config.eventTimeoutMs,
         });
 
