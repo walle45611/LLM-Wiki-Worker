@@ -24,9 +24,25 @@
     "triggers": {
         "crons": ["0 10 * * *"],
     },
+    "queues": {
+        "producers": [
+            {
+                "binding": "LLM_WIKI_QUEUE",
+                "queue": "llm-wiki-queue"
+            }
+        ],
+        "consumers": [
+            {
+                "queue": "llm-wiki-queue",
+                "max_batch_size": 1,
+                "max_batch_timeout": 1,
+                "max_retries": 2
+            }
+        ]
+    },
     "vars": {
         "APP_TIMEZONE": "Asia/Taipei",
-        "LINE_TARGET_USER_ID": "U666feedc6c76d6d033a0e19795b8d91d",
+        "LINE_TARGET_USER_ID": "Ua81fe50439a44728125caf476d7693a0",
         "GITHUB_OWNER": "walle4561",
         "GITHUB_REPO": "LLM-Wiki",
         "GITHUB_REF": "main",

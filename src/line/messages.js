@@ -1,11 +1,32 @@
 export function clampLineText(text) {
-    const normalized = text.trim();
+    const normalized = stripMarkdown(text).trim();
     const maxLength = 4500;
     if (normalized.length <= maxLength) {
         return normalized;
     }
 
     return `${normalized.slice(0, maxLength - 14)}\n\n[內容已截斷]`;
+}
+
+function stripMarkdown(text) {
+    return String(text || "")
+        .replace(/```[\s\S]*?```/g, (block) =>
+            block.replace(/```[a-zA-Z0-9_-]*\n?|```/g, "").trim(),
+        )
+        .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+        .replace(/\*\*(.*?)\*\*/g, "$1")
+        .replace(/__(.*?)__/g, "$1")
+        .replace(/(?<!\*)\*(?!\s)(.*?)(?<!\s)\*(?!\*)/g, "$1")
+        .replace(/(?<!_)_(?!\s)(.*?)(?<!\s)_(?!_)/g, "$1")
+        .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, "$1 $2")
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 $2")
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/^\s*[-*+]\s+/gm, "")
+        .replace(/^\s*\d+\.\s+/gm, "")
+        .replace(/^\s*>{1,}\s?/gm, "")
+        .replace(/^\s*[-*_]{3,}\s*$/gm, "")
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/\n{3,}/g, "\n\n");
 }
 
 export function buildUserErrorMessage(error, currentDateInfo) {

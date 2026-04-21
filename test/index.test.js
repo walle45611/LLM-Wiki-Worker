@@ -23,12 +23,18 @@ import {
 } from "../src/index.js";
 import { getRuntimeConfig } from "../src/config/runtime.js";
 import { fetchGithubFile } from "../src/github/client.js";
-import { buildQueryAgentTools, executeQueryToolCall } from "../src/ai/tools.js";
-
-const LINE_PUSH_ENDPOINT = "https://api.line.me/v2/bot/message/push";
+import {
+  buildQueryAgentTools,
+  executeQueryToolCall,
+  parseToolCallArguments,
+} from "../src/ai/tools.js";
 
 function encodeGithubContent(text) {
   return Buffer.from(text, "utf8").toString("base64");
+}
+
+function decodeGithubContent(text) {
+  return Buffer.from(text, "base64").toString("utf8");
 }
 
 function createJsonResponse(payload, status = 200) {
@@ -46,80 +52,6 @@ async function withMockedFetch(mockFetch, callback) {
   } finally {
     global.fetch = originalFetch;
   }
-}
-
-function createScheduledFetchMock(pushBodies) {
-  return async (url, options = {}) => {
-    const normalizedUrl = String(url);
-
-    if (normalizedUrl === LINE_PUSH_ENDPOINT) {
-      pushBodies.push(JSON.parse(options.body));
-      return new Response("{}", { status: 200 });
-    }
-
-    if (!normalizedUrl.startsWith("https://api.github.com/repos/")) {
-      throw new Error(`Unexpected fetch url: ${normalizedUrl}`);
-    }
-
-    if (normalizedUrl.includes("/contents/AGENTS.md?")) {
-      return createJsonResponse({
-        content: encodeGithubContent("router instructions"),
-      });
-    }
-
-    if (
-      normalizedUrl.includes("/contents/wiki%2Frules?") ||
-      normalizedUrl.includes("/contents/wiki/rules?")
-    ) {
-      return createJsonResponse([
-        { path: "wiki/rules/review-rules.md", type: "file" },
-      ]);
-    }
-
-    if (
-      normalizedUrl.includes("/contents/wiki%2Frules%2Freview-rules.md?") ||
-      normalizedUrl.includes("/contents/wiki/rules/review-rules.md?")
-    ) {
-      return createJsonResponse({
-        content: encodeGithubContent("只輸出摘要。"),
-      });
-    }
-
-    if (
-      normalizedUrl.includes("/contents/wiki%2Flog.md?") ||
-      normalizedUrl.includes("/contents/wiki/log.md?")
-    ) {
-      return createJsonResponse({
-        content: encodeGithubContent(`
-## [2026-04-20] ingest | alpha
-- created: \`wiki/summaries/alpha.md\`
-        `.trim()),
-      });
-    }
-
-    if (
-      normalizedUrl.includes("/contents/wiki%2Findex.md?") ||
-      normalizedUrl.includes("/contents/wiki/index.md?")
-    ) {
-      return createJsonResponse({
-        content: encodeGithubContent(`
-## Summaries
-- [alpha](wiki/summaries/alpha.md): alpha desc
-        `.trim()),
-      });
-    }
-
-    if (
-      normalizedUrl.includes("/contents/wiki%2Fsummaries%2Falpha.md?") ||
-      normalizedUrl.includes("/contents/wiki/summaries/alpha.md?")
-    ) {
-      return createJsonResponse({
-        content: encodeGithubContent("# Alpha\n\n今天讀了重點。"),
-      });
-    }
-
-    throw new Error(`Unhandled GitHub fetch url: ${normalizedUrl}`);
-  };
 }
 
 test("buildDateVariants includes common date formats", () => {
@@ -369,6 +301,17 @@ test("clampLineText truncates oversized LINE replies", () => {
   assert.match(clamped, /\[內容已截斷\]$/);
 });
 
+test("clampLineText strips markdown syntax for LINE replies", () => {
+  const clamped = clampLineText(
+    "# Title\n\n**bold** [link](https://example.com)\n- item\n1. first\n`code`",
+  );
+
+  assert.equal(
+    clamped,
+    "Title\n\nbold link https://example.com\nitem\nfirst\ncode",
+  );
+});
+
 test("buildUserErrorMessage returns a specific message for Workers AI daily limit", () => {
   const message = buildUserErrorMessage(
     new Error(
@@ -382,8 +325,8 @@ test("buildUserErrorMessage returns a specific message for Workers AI daily limi
   );
 });
 
-test("handleScheduledSummary pushes today's summary to the configured LINE user", async () => {
-  const pushBodies = [];
+test("handleScheduledSummary enqueues scheduled summary job", async () => {
+  const queuedJobs = [];
   const env = {
     LINE_CHANNEL_ACCESS_TOKEN: "line-token",
     LINE_CHANNEL_SECRET: "line-secret",
@@ -393,35 +336,28 @@ test("handleScheduledSummary pushes today's summary to the configured LINE user"
     GITHUB_TOKEN: "github-token",
     APP_TIMEZONE: "Asia/Taipei",
     AI_MODEL: "@cf/openai/gpt-oss-20b",
-    AI: {
-      async run() {
-        return {
-          response: "2026/04/20 你今天讀了 1 篇文章，重點是今天讀了重點。",
-        };
+    LLM_WIKI_QUEUE: {
+      async send(payload) {
+        queuedJobs.push(payload);
       },
     },
   };
 
-  await withMockedFetch(createScheduledFetchMock(pushBodies), async () => {
-    await handleScheduledSummary(
-      {
-        cron: "0 10 * * *",
-        scheduledTime: new Date("2026-04-20T10:00:00.000Z").getTime(),
-      },
-      env,
-    );
-  });
-
-  assert.equal(pushBodies.length, 1);
-  assert.equal(pushBodies[0].to, "U1234567890abcdef");
-  assert.equal(
-    pushBodies[0].messages[0].text,
-    "2026/04/20 你今天讀了 1 篇文章，重點是今天讀了重點。",
+  await handleScheduledSummary(
+    {
+      cron: "0 10 * * *",
+      scheduledTime: new Date("2026-04-20T10:00:00.000Z").getTime(),
+    },
+    env,
   );
+
+  assert.equal(queuedJobs.length, 1);
+  assert.equal(queuedJobs[0].type, "scheduled_summary");
+  assert.equal(queuedJobs[0].targetUserId, "U1234567890abcdef");
+  assert.equal(queuedJobs[0].text, "排程任務需要把當天整理結果寫入知識庫");
 });
 
-test("handleScheduledSummary pushes a fallback message when Workers AI daily limit is exhausted", async () => {
-  const pushBodies = [];
+test("handleScheduledSummary throws when queue enqueue fails", async () => {
   const env = {
     LINE_CHANNEL_ACCESS_TOKEN: "line-token",
     LINE_CHANNEL_SECRET: "line-secret",
@@ -431,32 +367,24 @@ test("handleScheduledSummary pushes a fallback message when Workers AI daily lim
     GITHUB_TOKEN: "github-token",
     APP_TIMEZONE: "Asia/Taipei",
     AI_MODEL: "@cf/openai/gpt-oss-20b",
-    AI: {
-      async run() {
+    LLM_WIKI_QUEUE: {
+      async send() {
         throw new Error(
-          "4006: you have used up your daily free allocation of 10,000 neurons, please upgrade to Cloudflare's Workers Paid plan if you would like to continue usage.",
+          "queue unavailable",
         );
       },
     },
   };
 
-  await withMockedFetch(createScheduledFetchMock(pushBodies), async () => {
-    await assert.rejects(
-      handleScheduledSummary(
-        {
-          cron: "0 10 * * *",
-          scheduledTime: new Date("2026-04-20T10:00:00.000Z").getTime(),
-        },
-        env,
-      ),
-      /4006/,
-    );
-  });
-
-  assert.equal(pushBodies.length, 1);
-  assert.equal(
-    pushBodies[0].messages[0].text,
-    "目前 Workers AI 今日免費額度已用完，請稍後再試。",
+  await assert.rejects(
+    handleScheduledSummary(
+      {
+        cron: "0 10 * * *",
+        scheduledTime: new Date("2026-04-20T10:00:00.000Z").getTime(),
+      },
+      env,
+    ),
+    /queue unavailable/,
   );
 });
 
@@ -469,10 +397,8 @@ test("handleScheduledSummary requires LINE_TARGET_USER_ID", async () => {
     GITHUB_TOKEN: "github-token",
     APP_TIMEZONE: "Asia/Taipei",
     AI_MODEL: "@cf/openai/gpt-oss-20b",
-    AI: {
-      async run() {
-        return { response: { rule: "D" } };
-      },
+    LLM_WIKI_QUEUE: {
+      async send() {},
     },
   };
 
@@ -523,7 +449,7 @@ test("getRuntimeConfig uses fixed summary timeout from code", () => {
   };
 
   const defaultConfig = getRuntimeConfig(baseEnv);
-  assert.equal(defaultConfig.summaryTimeoutMs, 60000);
+  assert.equal(defaultConfig.eventTimeoutMs, 120000);
 });
 
 test("fetchGithubFile fails fast when GitHub fetch times out", async () => {
@@ -596,10 +522,31 @@ test("buildQueryAgentTools includes get_file_tree for query agent discovery", ()
   assert.ok(
     tools.some((tool) => tool.function?.name === "get_file"),
   );
+  assert.ok(
+    tools.some((tool) => tool.function?.name === "upsert_file"),
+  );
+  assert.ok(
+    tools.some((tool) => tool.function?.name === "append_file"),
+  );
+  assert.ok(
+    tools.some((tool) => tool.function?.name === "replace_in_file"),
+  );
 });
 
-test("executeQueryToolCall returns full file content without truncation", async () => {
-  const longLog = `${"A".repeat(2500)}\n2026-04-20 still visible`;
+test("parseToolCallArguments tolerates trailing garbage after JSON", () => {
+  const result = parseToolCallArguments({
+    function: {
+      arguments:
+        '{"path":"wiki/assets/daily/2026-04-21.md","content":"hello"}} trailing',
+    },
+  });
+
+  assert.equal(result.path, "wiki/assets/daily/2026-04-21.md");
+  assert.equal(result.content, "hello");
+});
+
+test("executeQueryToolCall returns full file content", async () => {
+  const longLog = `${"A".repeat(4000)}\n2026-04-20 still visible`;
 
   await withMockedFetch(
     () =>
@@ -624,6 +571,287 @@ test("executeQueryToolCall returns full file content without truncation", async 
 
       assert.match(result.content, /2026-04-20 still visible/);
       assert.equal(result.content, longLog);
+    },
+  );
+});
+
+test("executeQueryToolCall keeps full content for wiki/rules markdown", async () => {
+  const longRule = `${"R".repeat(2500)}\nrouter rule tail visible`;
+
+  await withMockedFetch(
+    () =>
+      createJsonResponse({
+        content: encodeGithubContent(longRule),
+      }),
+    async () => {
+      const result = await executeQueryToolCall(
+        "get_file",
+        { path: "wiki/rules/review-rules.md" },
+        {
+          config: {
+            githubOwner: "owner",
+            githubRepo: "repo",
+            githubRef: "main",
+            githubToken: "token",
+          },
+          trace: {},
+          logInfo: () => {},
+        },
+      );
+
+      assert.equal(result.content, longRule);
+      assert.match(result.content, /router rule tail visible/);
+    },
+  );
+});
+
+test("executeQueryToolCall keeps full content for wiki/index.md", async () => {
+  const longIndex = `${"I".repeat(2500)}\nindex tail visible`;
+
+  await withMockedFetch(
+    () =>
+      createJsonResponse({
+        content: encodeGithubContent(longIndex),
+      }),
+    async () => {
+      const result = await executeQueryToolCall(
+        "get_file",
+        { path: "wiki/index.md" },
+        {
+          config: {
+            githubOwner: "owner",
+            githubRepo: "repo",
+            githubRef: "main",
+            githubToken: "token",
+          },
+          trace: {},
+          logInfo: () => {},
+        },
+      );
+
+      assert.equal(result.content, longIndex);
+      assert.match(result.content, /index tail visible/);
+    },
+  );
+});
+
+test("executeQueryToolCall upserts wiki file", async () => {
+  const requests = [];
+
+  await withMockedFetch(
+    async (url, options = {}) => {
+      requests.push({ url: String(url), options });
+      if ((options.method || "GET") === "GET") {
+        return new Response("{}", { status: 404 });
+      }
+      return createJsonResponse({
+        content: { sha: "content-sha" },
+        commit: { sha: "commit-sha" },
+      });
+    },
+    async () => {
+      const result = await executeQueryToolCall(
+        "upsert_file",
+        {
+          path: "wiki/assets/daily/2026-04-21.md",
+          content: "hello world",
+          commit_message: "chore: write digest",
+        },
+        {
+          config: {
+            githubOwner: "owner",
+            githubRepo: "repo",
+            githubRef: "main",
+            githubToken: "token",
+          },
+          trace: {},
+          logInfo: () => {},
+        },
+      );
+
+      assert.equal(result.path, "wiki/assets/daily/2026-04-21.md");
+      assert.equal(result.committed, true);
+      assert.equal(result.content_sha, "content-sha");
+      assert.equal(result.commit_sha, "commit-sha");
+      assert.equal(requests.length, 2);
+      assert.equal(requests[1].options.method, "PUT");
+    },
+  );
+});
+
+test("executeQueryToolCall rejects upsert outside wiki", async () => {
+  await assert.rejects(
+    executeQueryToolCall(
+      "upsert_file",
+      {
+        path: "notes/test.md",
+        content: "hello world",
+      },
+      {
+        config: {
+          githubOwner: "owner",
+          githubRepo: "repo",
+          githubRef: "main",
+          githubToken: "token",
+        },
+        trace: {},
+        logInfo: () => {},
+      },
+    ),
+    /only allows writing under wiki\//,
+  );
+});
+
+test("executeQueryToolCall appends wiki file content", async () => {
+  const requests = [];
+
+  await withMockedFetch(
+    async (url, options = {}) => {
+      requests.push({ url: String(url), options });
+      if ((options.method || "GET") === "GET") {
+        return createJsonResponse({
+          sha: "old-sha",
+          content: encodeGithubContent("hello\n"),
+        });
+      }
+      return createJsonResponse({
+        content: { sha: "new-content-sha" },
+        commit: { sha: "new-commit-sha" },
+      });
+    },
+    async () => {
+      const result = await executeQueryToolCall(
+        "append_file",
+        {
+          path: "wiki/log.md",
+          content: "world\n",
+        },
+        {
+          config: {
+            githubOwner: "owner",
+            githubRepo: "repo",
+            githubRef: "main",
+            githubToken: "token",
+          },
+          trace: {},
+          logInfo: () => {},
+        },
+      );
+
+      assert.equal(result.path, "wiki/log.md");
+      assert.equal(result.appended_length, 6);
+      assert.equal(result.committed, true);
+      const putRequest = requests.find(
+        (request) => (request.options.method || "GET") === "PUT",
+      );
+      assert.ok(putRequest);
+      const putBody = JSON.parse(putRequest.options.body);
+      assert.equal(decodeGithubContent(putBody.content), "hello\nworld\n");
+    },
+  );
+});
+
+test("executeQueryToolCall replaces text in wiki file", async () => {
+  const requests = [];
+
+  await withMockedFetch(
+    async (url, options = {}) => {
+      requests.push({ url: String(url), options });
+      if ((options.method || "GET") === "GET") {
+        return createJsonResponse({
+          sha: "old-sha",
+          content: encodeGithubContent("alpha beta gamma"),
+        });
+      }
+      return createJsonResponse({
+        content: { sha: "replace-content-sha" },
+        commit: { sha: "replace-commit-sha" },
+      });
+    },
+    async () => {
+      const result = await executeQueryToolCall(
+        "replace_in_file",
+        {
+          path: "wiki/index.md",
+          find: "beta",
+          replace: "delta",
+        },
+        {
+          config: {
+            githubOwner: "owner",
+            githubRepo: "repo",
+            githubRef: "main",
+            githubToken: "token",
+          },
+          trace: {},
+          logInfo: () => {},
+        },
+      );
+
+      assert.equal(result.path, "wiki/index.md");
+      assert.equal(result.replaced, true);
+      const putRequest = requests.find(
+        (request) => (request.options.method || "GET") === "PUT",
+      );
+      assert.ok(putRequest);
+      const putBody = JSON.parse(putRequest.options.body);
+      assert.equal(decodeGithubContent(putBody.content), "alpha delta gamma");
+    },
+  );
+});
+
+test("executeQueryToolCall rejects append outside wiki", async () => {
+  await assert.rejects(
+    executeQueryToolCall(
+      "append_file",
+      {
+        path: "raw/file.md",
+        content: "hello",
+      },
+      {
+        config: {
+          githubOwner: "owner",
+          githubRepo: "repo",
+          githubRef: "main",
+          githubToken: "token",
+        },
+        trace: {},
+        logInfo: () => {},
+      },
+    ),
+    /only allows writing under wiki\//,
+  );
+});
+
+test("executeQueryToolCall rejects replace when target text missing", async () => {
+  await withMockedFetch(
+    async () =>
+      createJsonResponse({
+        sha: "old-sha",
+        content: encodeGithubContent("alpha beta gamma"),
+      }),
+    async () => {
+      await assert.rejects(
+        executeQueryToolCall(
+          "replace_in_file",
+          {
+            path: "wiki/index.md",
+            find: "missing",
+            replace: "delta",
+          },
+          {
+            config: {
+              githubOwner: "owner",
+              githubRepo: "repo",
+              githubRef: "main",
+              githubToken: "token",
+            },
+            trace: {},
+            logInfo: () => {},
+          },
+        ),
+        /could not find target text/,
+      );
     },
   );
 });

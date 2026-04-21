@@ -15,6 +15,7 @@ export async function buildLineQueryReply({
     trace,
     eventPrefix,
     totalStartedAt,
+    timeoutMs,
 }) {
     logInfo(`${eventPrefix}.user_query`, {
         requestId: trace.requestId,
@@ -28,17 +29,23 @@ export async function buildLineQueryReply({
     logInfo(`${eventPrefix}.agent_timeout_selected`, {
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
-        timeoutMs: config.summaryTimeoutMs,
+        timeoutMs,
     });
 
+    const userPrompt =
+        eventPrefix === "scheduled_queue"
+            ? text
+            : `你是 LLM-Wiki-Worker，${text}`;
+
     const reply = await runQueryAgent({
-        userText: text,
+        userPrompt,
         agentPrompt,
         aiBinding: env.AI,
         aiModel: config.summaryAiModel,
         config,
         trace,
-        timeoutMs: config.summaryTimeoutMs,
+        timeoutMs,
+        currentDateInfo,
     });
     const message = clampLineText(reply);
     logInfo(`${eventPrefix}.summary_generated`, {

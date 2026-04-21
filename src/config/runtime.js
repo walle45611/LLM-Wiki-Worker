@@ -2,8 +2,10 @@ export const LINE_REPLY_ENDPOINT = "https://api.line.me/v2/bot/message/reply";
 export const LINE_PUSH_ENDPOINT = "https://api.line.me/v2/bot/message/push";
 export const AGENTS_PATH = "AGENTS.md";
 export const DEFAULT_AI_MODEL = "@cf/openai/gpt-oss-20b";
-export const DEFAULT_SCHEDULED_QUERY = "今天我讀了什麼？";
-export const SUMMARY_TIMEOUT_MS = 60000;
+export function buildScheduledQuery(currentDateInfo) {
+    return "排程任務需要把當天整理結果寫入知識庫";
+}
+export const EVENT_TIMEOUT_MS = 120000;
 
 export function getRuntimeConfig(env) {
     const required = [
@@ -31,7 +33,7 @@ export function getRuntimeConfig(env) {
             env.SUMMARY_AI_MODEL ||
             env.AI_MODEL ||
             DEFAULT_AI_MODEL,
-        summaryTimeoutMs: SUMMARY_TIMEOUT_MS,
+        eventTimeoutMs: EVENT_TIMEOUT_MS,
     };
 }
 

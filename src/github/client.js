@@ -67,6 +67,73 @@ export async function fetchGithubFile(config, filePath, options = {}) {
     return decoded;
 }
 
+export async function upsertGithubFile(config, filePath, content, options = {}) {
+    const { logInfo, commitMessage } = options;
+    const encodedPath = filePath
+        .split("/")
+        .map((segment) => encodeURIComponent(segment))
+        .join("/");
+    const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(config.githubOwner)}/${encodeURIComponent(config.githubRepo)}/contents/${encodedPath}`;
+    const message =
+        String(commitMessage || "").trim() || `chore: update ${filePath}`;
+
+    let sha = null;
+    try {
+        const existingResponse = await fetchWithTimeout(
+            `${url}?ref=${encodeURIComponent(config.githubRef)}`,
+            config.githubToken,
+            filePath,
+            GITHUB_FETCH_TIMEOUT_MS,
+        );
+        if (existingResponse.ok) {
+            const payload = await existingResponse.json();
+            sha = typeof payload?.sha === "string" ? payload.sha : null;
+        }
+    } catch (error) {
+        logInfo?.("github.upsert_lookup_failed", {
+            path: filePath,
+            errorMessage: error instanceof Error ? error.message : String(error),
+        });
+    }
+
+    const body = {
+        message,
+        content: btoa(unescape(encodeURIComponent(String(content || "")))),
+        branch: config.githubRef,
+    };
+    if (sha) {
+        body.sha = sha;
+    }
+
+    logInfo?.("github.upsert_started", {
+        path: filePath,
+        hasExistingSha: Boolean(sha),
+        message,
+    });
+    const response = await fetchWithTimeout(
+        url,
+        config.githubToken,
+        filePath,
+        GITHUB_FETCH_TIMEOUT_MS,
+        {
+            method: "PUT",
+            body: JSON.stringify(body),
+        },
+    );
+    if (!response.ok) {
+        const text = await safeReadResponseText(response);
+        throw new Error(
+            `GitHub upsert failed with status ${response.status}: ${text}`,
+        );
+    }
+    const payload = await response.json();
+    logInfo?.("github.upsert_completed", {
+        path: filePath,
+        contentSha: payload?.content?.sha || "",
+    });
+    return payload;
+}
+
 export async function fetchGithubFileTree(config, basePath, maxDepth, options = {}) {
     const { logInfo } = options;
     const entries = [];
@@ -175,16 +242,24 @@ function normalizePath(path) {
         .trim();
 }
 
-async function fetchWithTimeout(url, githubToken, resourcePath, timeoutMs = GITHUB_FETCH_TIMEOUT_MS) {
+async function fetchWithTimeout(
+    url,
+    githubToken,
+    resourcePath,
+    timeoutMs = GITHUB_FETCH_TIMEOUT_MS,
+    init = {},
+) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
         return await fetch(url, {
+            ...init,
             headers: {
                 Accept: "application/vnd.github+json",
                 Authorization: `Bearer ${githubToken}`,
                 "User-Agent": "llmwikiworker",
                 "X-GitHub-Api-Version": "2022-11-28",
+                ...(init.headers || {}),
             },
             signal: controller.signal,
         });
@@ -197,5 +272,13 @@ async function fetchWithTimeout(url, githubToken, resourcePath, timeoutMs = GITH
         throw error;
     } finally {
         clearTimeout(timer);
+    }
+}
+
+async function safeReadResponseText(response) {
+    try {
+        return await response.text();
+    } catch {
+        return "";
     }
 }

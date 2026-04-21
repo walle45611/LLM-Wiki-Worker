@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { extractAiText, extractSummaryReplyFromResult } from "./ai/response.js";
 import {
-    DEFAULT_SCHEDULED_QUERY,
+    buildScheduledQuery,
     getRuntimeConfig,
     getScheduledDate,
     maskLineUserId,
@@ -82,7 +82,7 @@ app.post("/webhook", async (c) => {
     const events = Array.isArray(payload.events) ? payload.events : [];
     logInfo("webhook.parsed", { requestId, eventCount: events.length });
 
-    const processing = Promise.all(
+    await Promise.all(
         events.map((event, index) =>
             handleLineEvent(event, c.env, {
                 requestId,
@@ -90,18 +90,11 @@ app.post("/webhook", async (c) => {
                 totalEvents: events.length,
             }),
         ),
-    )
-        .then(() => {
-            logInfo("webhook.completed", {
-                requestId,
-                elapsedMs: Date.now() - startedAt,
-            });
-        })
-        .catch((error) => {
-            logError("webhook.failed", { requestId }, error);
-        });
-
-    c.executionCtx.waitUntil(processing);
+    );
+    logInfo("webhook.completed", {
+        requestId,
+        elapsedMs: Date.now() - startedAt,
+    });
     logInfo("webhook.accepted", {
         requestId,
         eventCount: events.length,
@@ -113,6 +106,7 @@ app.post("/webhook", async (c) => {
 export const worker = {
     fetch: app.fetch,
     scheduled: handleScheduledSummary,
+    queue: handleLineQueryQueue,
 };
 
 export default worker;
@@ -154,13 +148,22 @@ export async function handleLineEvent(event, env, trace = {}) {
     }
 
     const text = event.message.text.trim();
-    let currentDateInfo = null;
+    const sourceUserId = String(event?.source?.userId || "").trim();
+    if (!sourceUserId) {
+        logWarn("line.queue_missing_user_id", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+        });
+        return replyToLine(
+            event.replyToken,
+            "目前僅支援一對一聊天查詢。",
+            env.LINE_CHANNEL_ACCESS_TOKEN,
+        );
+    }
 
     try {
         const config = getRuntimeConfig(env);
-        currentDateInfo = getCurrentDateInfo(config.timezone);
-        const lineEventTimeoutMs = config.summaryTimeoutMs;
-        logInfo("line.runtime_config_loaded", {
+        logInfo("line.queue_runtime_config_loaded", {
             requestId: trace.requestId,
             eventIndex: trace.eventIndex,
             githubOwner: config.githubOwner,
@@ -168,42 +171,21 @@ export async function handleLineEvent(event, env, trace = {}) {
             githubRef: config.githubRef,
             timezone: config.timezone,
             summaryAiModel: config.summaryAiModel,
-            summaryTimeoutMs: config.summaryTimeoutMs,
+            eventTimeoutMs: config.eventTimeoutMs,
         });
-
-        const message = await withTimeout(
-            buildLineQueryReply({
-                text,
-                env,
-                config,
-                currentDateInfo,
-                trace,
-                eventPrefix: "line",
-                totalStartedAt: eventStartedAt,
-            }),
-            lineEventTimeoutMs,
-            "LINE event processing timed out",
-        );
-        logInfo("line.reply_content", {
+        await env.LLM_WIKI_QUEUE.send({
+            type: "line_text_query",
+            requestId: trace.requestId || crypto.randomUUID(),
+            eventIndex: trace.eventIndex ?? 0,
+            text,
+            sourceUserId,
+            queuedAt: Date.now(),
+        });
+        logInfo("line.queue_enqueued", {
             requestId: trace.requestId,
             eventIndex: trace.eventIndex,
-            replyPreview: toPreview(message),
-            replyLength: message.length,
-        });
-        logInfo("line.reply_ready", {
-            requestId: trace.requestId,
-            eventIndex: trace.eventIndex,
-            replyLength: message.length,
-            totalElapsedMs: Date.now() - eventStartedAt,
-        });
-        await respondToLineEvent(
-            event,
-            message,
-            env.LINE_CHANNEL_ACCESS_TOKEN,
-        );
-        logInfo("line.reply_completed", {
-            requestId: trace.requestId,
-            eventIndex: trace.eventIndex,
+            sourceUserIdPreview: maskLineUserId(sourceUserId),
+            textPreview: toPreview(text),
             totalElapsedMs: Date.now() - eventStartedAt,
         });
         return;
@@ -217,71 +199,148 @@ export async function handleLineEvent(event, env, trace = {}) {
             },
             error,
         );
-        const fallbackMessage = buildUserErrorMessage(error, currentDateInfo);
+        const fallbackMessage = "目前系統忙碌，請稍後再試。";
+        await replyToLine(
+            event.replyToken,
+            fallbackMessage,
+            env.LINE_CHANNEL_ACCESS_TOKEN,
+        );
+        logInfo("line.reply_fallback_completed", {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            replyLength: fallbackMessage.length,
+            totalElapsedMs: Date.now() - eventStartedAt,
+        });
+    }
+}
+
+export async function handleLineQueryQueue(batch, env) {
+    for (const message of batch.messages) {
+        const job = message.body || {};
+        if (!["line_text_query", "scheduled_summary"].includes(job.type)) {
+            logWarn("line.queue_unknown_job_type", {
+                requestId: job.requestId || "",
+                type: String(job.type || ""),
+            });
+            message.ack();
+            continue;
+        }
+
+        const startedAt = Date.now();
+        const trace = {
+            requestId: String(job.requestId || crypto.randomUUID()),
+            eventIndex: Number.isFinite(job.eventIndex) ? job.eventIndex : 0,
+        };
+        let currentDateInfo = null;
+
         try {
-            await respondToLineEvent(
-                event,
-                fallbackMessage,
-                env.LINE_CHANNEL_ACCESS_TOKEN,
-            );
-            logInfo("line.reply_fallback_completed", {
+            const config = getRuntimeConfig(env);
+            const scheduledTime = Number(job.scheduledTime);
+            const currentDate =
+                Number.isFinite(scheduledTime) && scheduledTime > 0
+                    ? new Date(scheduledTime)
+                    : undefined;
+            currentDateInfo = getCurrentDateInfo(config.timezone, currentDate);
+            const text = String(job.text || "").trim();
+            const userId =
+                job.type === "scheduled_summary"
+                    ? String(job.targetUserId || "").trim()
+                    : String(job.sourceUserId || "").trim();
+            if (!text || !userId) {
+                throw new Error("Invalid queue payload: missing text or sourceUserId");
+            }
+
+            const reply = await buildLineQueryReply({
+                text,
+                env,
+                config,
+                currentDateInfo,
+                trace,
+                eventPrefix:
+                    job.type === "scheduled_summary"
+                        ? "scheduled_queue"
+                        : "line_queue",
+                totalStartedAt: startedAt,
+                timeoutMs: config.eventTimeoutMs,
+            });
+
+            await pushToLineUser(userId, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+            logInfo(
+                job.type === "scheduled_summary"
+                    ? "scheduled.queue_job_completed"
+                    : "line.queue_job_completed",
+                {
                 requestId: trace.requestId,
                 eventIndex: trace.eventIndex,
-                replyLength: fallbackMessage.length,
-                totalElapsedMs: Date.now() - eventStartedAt,
-            });
-            return;
-        } catch (replyError) {
+                sourceUserIdPreview: maskLineUserId(userId),
+                replyLength: reply.length,
+                totalElapsedMs: Date.now() - startedAt,
+                },
+            );
+            message.ack();
+        } catch (error) {
             logError(
-                "line.reply_fallback_failed",
+                job.type === "scheduled_summary"
+                    ? "scheduled.queue_job_failed"
+                    : "line.queue_job_failed",
                 {
                     requestId: trace.requestId,
                     eventIndex: trace.eventIndex,
-                    totalElapsedMs: Date.now() - eventStartedAt,
+                    totalElapsedMs: Date.now() - startedAt,
                 },
-                replyError,
+                error,
             );
-            throw replyError;
+
+            const fallbackMessage = clampLineText(
+                buildUserErrorMessage(error, currentDateInfo),
+            );
+            const userId =
+                job.type === "scheduled_summary"
+                    ? String(job.targetUserId || "").trim()
+                    : String(job.sourceUserId || "").trim();
+            if (userId) {
+                try {
+                    await pushToLineUser(userId, fallbackMessage, env.LINE_CHANNEL_ACCESS_TOKEN);
+                    logInfo(
+                        job.type === "scheduled_summary"
+                            ? "scheduled.queue_job_fallback_pushed"
+                            : "line.queue_job_fallback_pushed",
+                        {
+                        requestId: trace.requestId,
+                        eventIndex: trace.eventIndex,
+                        sourceUserIdPreview: maskLineUserId(userId),
+                        replyLength: fallbackMessage.length,
+                        totalElapsedMs: Date.now() - startedAt,
+                        },
+                    );
+                } catch (pushError) {
+                    logError(
+                        job.type === "scheduled_summary"
+                            ? "scheduled.queue_job_fallback_failed"
+                            : "line.queue_job_fallback_failed",
+                        {
+                            requestId: trace.requestId,
+                            eventIndex: trace.eventIndex,
+                        },
+                        pushError,
+                    );
+                }
+            }
+            message.ack();
         }
     }
-}
-
-async function respondToLineEvent(event, text, channelAccessToken) {
-    const sourceUserId = String(event?.source?.userId || "").trim();
-    if (sourceUserId) {
-        return pushToLineUser(sourceUserId, text, channelAccessToken);
-    }
-    return replyToLine(event.replyToken, text, channelAccessToken);
-}
-
-async function withTimeout(promise, timeoutMs, timeoutMessage) {
-    let timer = null;
-    return Promise.race([
-        promise,
-        new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
-        }),
-    ]).finally(() => {
-        if (timer) {
-            clearTimeout(timer);
-        }
-    });
 }
 
 export async function handleScheduledSummary(controller, env) {
     const requestId = crypto.randomUUID();
     const startedAt = Date.now();
-    let currentDateInfo = null;
-    let targetUserId = "";
-    let pushAttempted = false;
 
     try {
         const config = getRuntimeConfig(env);
-        currentDateInfo = getCurrentDateInfo(
-            config.timezone,
-            getScheduledDate(controller),
-        );
-        targetUserId = requireLineTargetUserId(config);
+        const scheduledDate = getScheduledDate(controller);
+        const currentDateInfo = getCurrentDateInfo(config.timezone, scheduledDate);
+        const targetUserId = requireLineTargetUserId(config);
+        const text = buildScheduledQuery(currentDateInfo);
         logInfo("scheduled.received", {
             requestId,
             cron: String(controller?.cron || ""),
@@ -296,93 +355,34 @@ export async function handleScheduledSummary(controller, env) {
             githubRef: config.githubRef,
             timezone: config.timezone,
             summaryAiModel: config.summaryAiModel,
-            summaryTimeoutMs: config.summaryTimeoutMs,
+            eventTimeoutMs: config.eventTimeoutMs,
         });
 
-        const message = await buildLineQueryReply({
-            text: DEFAULT_SCHEDULED_QUERY,
-            env,
-            config,
-            currentDateInfo,
-            trace: { requestId, eventIndex: 0 },
-            eventPrefix: "scheduled",
-            totalStartedAt: startedAt,
-        });
-
-        logInfo("scheduled.reply_content", {
+        await env.LLM_WIKI_QUEUE.send({
+            type: "scheduled_summary",
             requestId,
-            replyPreview: toPreview(message),
-            replyLength: message.length,
+            eventIndex: 0,
+            text,
+            targetUserId,
+            scheduledTime: scheduledDate.getTime(),
+            queuedAt: Date.now(),
         });
 
-        pushAttempted = true;
-        try {
-            await pushToLineUser(
-                targetUserId,
-                message,
-                env.LINE_CHANNEL_ACCESS_TOKEN,
-            );
-        } catch (pushError) {
-            if (
-                pushError instanceof Error &&
-                /LINE push failed with status 400/i.test(pushError.message)
-            ) {
-                const fallbackMessage = clampLineText(
-                    buildUserErrorMessage(pushError, currentDateInfo),
-                );
-                await pushToLineUser(
-                    targetUserId,
-                    fallbackMessage,
-                    env.LINE_CHANNEL_ACCESS_TOKEN,
-                );
-                logInfo("scheduled.push_retry_completed", {
-                    requestId,
-                    replyLength: fallbackMessage.length,
-                    totalElapsedMs: Date.now() - startedAt,
-                });
-            } else {
-                throw pushError;
-            }
-        }
-        logInfo("scheduled.push_completed", {
+        logInfo("scheduled.enqueued", {
             requestId,
-            replyLength: message.length,
+            targetUserIdPreview: maskLineUserId(targetUserId),
+            textPreview: toPreview(text),
             totalElapsedMs: Date.now() - startedAt,
         });
     } catch (error) {
         logError(
-            "scheduled.handle_failed",
+            "scheduled.enqueue_failed",
             {
                 requestId,
                 totalElapsedMs: Date.now() - startedAt,
             },
             error,
         );
-
-        if (!pushAttempted && currentDateInfo && targetUserId) {
-            const fallbackMessage = clampLineText(
-                buildUserErrorMessage(error, currentDateInfo),
-            );
-            try {
-                await pushToLineUser(
-                    targetUserId,
-                    fallbackMessage,
-                    env.LINE_CHANNEL_ACCESS_TOKEN,
-                );
-                logInfo("scheduled.push_fallback_completed", {
-                    requestId,
-                    replyLength: fallbackMessage.length,
-                    totalElapsedMs: Date.now() - startedAt,
-                });
-            } catch (pushError) {
-                logError(
-                    "scheduled.push_fallback_failed",
-                    { requestId },
-                    pushError,
-                );
-            }
-        }
-
         throw error;
     }
 }

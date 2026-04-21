@@ -10,75 +10,45 @@ import {
 import { extractAiText, extractSummaryReplyFromResult } from "../ai/response.js";
 import { logInfo, logWarn, toPreview } from "../logger.js";
 
-const DEFAULT_MAX_TOKENS = 2048;
+const DEFAULT_MAX_TOKENS = 3072;
 const QUERY_AGENT_TIMEOUT_REPLY =
     "目前整理流程逾時，請稍後再試。";
 
 export async function runQueryAgent({
-    userText,
+    userPrompt,
     agentPrompt,
     aiBinding,
     aiModel,
     config,
     trace = {},
     timeoutMs,
+    currentDateInfo,
 }) {
     assertAiBindingConfigured(aiBinding);
     const tools = buildQueryAgentTools({ enableFileTree: true });
-    const instructions = String(agentPrompt || "").trim();
-    const systemPrompt = `【可用工具】
-1) get_file：讀取單一檔案內容。參數：path（必填）
-2) get_file_tree：列出指定路徑下的檔案與資料夾。參數：base_path（必填）、max_depth（選填）
+    const agentInstructions = String(agentPrompt || "").trim();
+    const systemPrompt = `
+啟動規則：
+1. 收到任務後，先讀 AGENTS.md
+2. 再依 AGENTS.md 的要求，先讀 wiki/rules/router-rules.md 與必要 rules
+3. 未讀完必要規則前，不得直接回答，不得直接寫入
 
+工作限制：
+- raw/ 絕對唯讀
+- 只能根據實際讀到的內容工作
 
-【強制流程】
-1) 第一個工具呼叫必須是：
-   get_file(path="wiki/rules/router-rules.md")
-2) 讀取 router-rules.md 後，必須根據使用者 prompt 判斷對應 rule，並立刻使用 get_file 讀取該 rule（檔案位於 wiki/rules/*.md）
-3) 在讀完 router-rules.md 與對應 rule 前，不得回答
-4) 回答前，至少必須已讀取：
-   - wiki/rules/router-rules.md
-   - 一個對應 rule
-   - 一個與問題直接相關的 wiki 檔案
-
-【工具規則】
-1) 你可以使用 get_file 讀取檔案，也可以在需要確認路徑時使用 get_file_tree
-2) 不得自行猜測檔名或路徑（例如自行假設 wiki/reading-log.md 存在）
-3) 後續只能讀取下列來源中明確出現的 wiki/ 或 raw/ 路徑：
-   - 使用者 prompt 明確提到的路徑
-   - router-rules.md 明確指出的路徑
-   - 已讀 rule 明確指出的路徑
-   - 已讀檔案內明確列出的路徑
-   - get_file_tree 列出的路徑
-4) 若下一個檔案路徑在已讀內容中沒有被明確指出，必須先用 get_file_tree 確認，或直接說明路徑資訊不足，不得自行臆測
-5) 若某個檔案路徑未曾在使用者 prompt、router-rules.md、已讀 rule、已讀檔案、或 get_file_tree 結果中明確出現，禁止呼叫 get_file 讀取該路徑
-
-【回答規則】
-1) 只根據實際讀到的 wiki/ 內容回答
-2) 若資料不足、檔案不存在、或無法依規則完成判斷，必須直接說明，不得猜測
-
-【輸出規則】
-1) 最終輸出只能是適合 LINE 或手機通訊軟體閱讀的純文字訊息
-2) 保持精簡、清楚、好掃讀，避免文字牆
-3) 可適度使用 emoji，但不要過量
-4) 段落名稱一律改用【】表示，例如【4/18 知識庫回顧】
-5) 禁止使用任何 Markdown 格式或樣式符號，包括但不限於：#、##、###、**粗體**、__粗體__、*斜體*、_斜體_、清單核取方塊、程式碼區塊標記、---、***、___
-6) 禁止輸出任何結尾寒暄、邀請、延伸提問或客服式收尾，例如：
-   - 如果您想更深入了解任何一篇，隨時告訴我！
-   - 如果你想看更多，我可以再幫你整理
-   - 有需要的話再跟我說
-7) 結尾必須直接停在內容本身，不得附加多餘一句總結、提醒或邀請
-8) 在輸出最終答案前，必須先自行逐項檢查格式是否合規
-9) 若檢查後仍包含 #、##、###、**、__、*、_、---、***、___、Markdown 清單格式、結尾語、邀請語、或任何不屬於內容本身的補充句，禁止直接輸出，必須先改寫到完全移除後才能結束
-10) 只有在確認最終文字完全不包含上述違規內容時，才能輸出最終答案`;
+時間資訊：
+- 今天日期（${currentDateInfo?.timezone || "Asia/Taipei"}）：${currentDateInfo?.displayDate || ""} ${currentDateInfo?.weekday || ""}
+- ISO 日期：${currentDateInfo?.isoDate || ""}
+`.trim();
     const messages = [
         {
-            role: "assistant",
+            role: "system",
             content: systemPrompt,
         },
         {
             role: "user",
-            content: String(userText || "").trim(),
+            content: String(userPrompt || "").trim(),
         },
     ];
 
@@ -91,13 +61,13 @@ export async function runQueryAgent({
     const startedAt = Date.now();
     const deadlineMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 60000;
     let conversation = [...messages];
-    const maxRounds = 12;
+    const maxRounds = 100;
     logInfo("ai.query_agent_started", {
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
         model: aiModel,
         promptLength: systemPrompt.length,
-        userTextPreview: toPreview(userText),
+        userTextPreview: toPreview(userPrompt),
         maxRounds,
         timeoutMs: deadlineMs,
     });
@@ -114,9 +84,9 @@ export async function runQueryAgent({
             eventIndex: trace.eventIndex,
             round: round + 1,
             model: aiModel,
-            instructionPreview: previewWithLimit(instructions, 1600),
+            instructionPreview: String(agentInstructions || ""),
             promptLength: systemPrompt.length,
-            promptPreview: previewWithLimit(systemPrompt, 1600),
+            promptPreview: String(systemPrompt || ""),
             remainingMs,
         });
 
@@ -124,7 +94,6 @@ export async function runQueryAgent({
         try {
             result = await runAiWithTimeout(
                 aiBinding.run(aiModel, {
-                    ...(instructions ? { instructions } : {}),
                     messages: conversation,
                     tools,
                     max_tokens: DEFAULT_MAX_TOKENS,
@@ -167,8 +136,8 @@ export async function runQueryAgent({
             requestId: trace.requestId,
             eventIndex: trace.eventIndex,
             round: round + 1,
-            outputRawPreview: previewWithLimit(JSON.stringify(result), 2200),
-            outputTextPreview: previewWithLimit(extractAiText(result), 1600),
+            outputRawPreview: JSON.stringify(result),
+            outputTextPreview: extractAiText(result),
         });
 
         const toolCalls = extractToolCalls(result);
@@ -229,7 +198,7 @@ export async function runQueryAgent({
                 eventIndex: trace.eventIndex,
                 round: round + 1,
                 name,
-                argsPreview: previewWithLimit(JSON.stringify(args), 1200),
+                argsPreview: JSON.stringify(args),
             });
             let toolResult = null;
             try {
@@ -244,7 +213,7 @@ export async function runQueryAgent({
                     eventIndex: trace.eventIndex,
                     round: round + 1,
                     name,
-                    argsPreview: previewWithLimit(JSON.stringify(args), 1200),
+                    argsPreview: JSON.stringify(args),
                     errorMessage: error instanceof Error ? error.message : String(error),
                 });
                 if (isTimeoutLikeError(error)) {
@@ -261,7 +230,7 @@ export async function runQueryAgent({
                 eventIndex: trace.eventIndex,
                 round: round + 1,
                 name,
-                resultPreview: previewWithLimit(JSON.stringify(toolResult), 1200),
+                resultPreview: JSON.stringify(toolResult),
             });
             toolMessages.push({
                 role: "tool",
@@ -327,12 +296,4 @@ async function runAiWithTimeout(promise, timeoutMs, timeoutMessage) {
 function isTimeoutLikeError(error) {
     const message = error instanceof Error ? error.message : String(error);
     return /timed out|timeout|AbortError/i.test(message);
-}
-
-function previewWithLimit(text, maxLength) {
-    const normalized = String(text || "").replace(/\s+/g, " ").trim();
-    if (normalized.length <= maxLength) {
-        return normalized;
-    }
-    return `${normalized.slice(0, maxLength)}...`;
 }
