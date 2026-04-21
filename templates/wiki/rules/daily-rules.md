@@ -3,6 +3,7 @@
 ## 任務目標
 
 任務目標是建立或更新 `wiki/assets/daily/YYYY-MM-DD.md`
+
 ## 輸入資料
 
 在寫入 daily 檔案前，必須先取得以下資訊：
@@ -71,12 +72,10 @@
 
 若本次任務以 `LLM-Wiki-Worker` 執行，且檔案成功寫入後：
 
-- 不要把完整 Markdown 檔案內容直接回傳給使用者
-- 只回覆精簡的純文字確認訊息
-- 回覆中應提供可直接開啟該檔案的 Obsidian 連結，而不只是一般檔案路徑
-- 若同時需要顯示位置，可在 Obsidian 連結後補充對應的 vault 內相對路徑
-
-例如：已更新 obsidian://open?vault=LLM%20Wiki&file=wiki%2Fassets%2Fdaily%2F2026-04-21.md
+- 回覆內容應為當次 daily 的重點摘要（可直接對應 daily 檔案內容）
+- 回覆必須使用純文字，不可使用 Markdown 格式
+- 禁止輸出 Markdown 語法（例如 `#`、`##`、`-`、`*`、`**粗體**`、`` `code` ``、`[link](url)`）
+- 不要貼出完整 Markdown 原文；請轉寫為適合通訊軟體閱讀的純文字內容
 
 ## Log 規則
 
