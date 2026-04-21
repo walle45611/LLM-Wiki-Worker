@@ -73,26 +73,6 @@ LLMWikiWorker 就是為了解決這個痛點而生。
 - `wrangler.jsonc`
   - Cloudflare Worker 設定（AI binding、Queue producer/consumer、cron、vars）
 
-- `package.json`
-  - 專案 scripts 與相依設定
-
-- `bun.lock`
-  - Bun lockfile，CI 與部署用來固定相依版本
-
-- `README.md`
-  - 專案說明文件（架構、規則系統、初始化、部署）
-
-- `.env.example`
-  - 本地環境變數範本
-
-- `.dev.vars`
-  - 本地 wrangler dev 使用的變數檔（通常不應提交敏感值）
-
-- `.gitignore` / `.editorconfig`
-  - 版本控制忽略規則與編輯器格式規範
-
-- `node_modules/`、`.wrangler/`
-  - 本地依賴與執行快取/狀態資料夾（開發產物）
 
 ## Queue Jobs
 
