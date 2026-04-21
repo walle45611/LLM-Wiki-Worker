@@ -103,14 +103,28 @@
 
 ## `index.md` 更新規則
 
-`wiki/index.md` 是內容導向的總索引。每次 ingest 都要更新。
+`wiki/index.md` 是內容導向的總索引。每次 ingest 都必須更新。
 
-至少維護：
+硬性要求：
 
-- `summaries/` 下新增或更新的頁面條目
-- `concepts/` 下新增的概念頁條目
-- 必要時更新一行描述，讓後續查詢能先靠 index 找路，再深入讀頁面
-- `Summaries` 條目應優先帶上該 summary 被收錄進 LLM Wiki 的日期，也就是 `created`，格式建議為 `- [slug](path) · YYYY-MM-DD: description`
+1. 只要本次任務有新增或更新任何 `wiki/summaries/*.md`，就必須同步更新 `wiki/index.md` 的 `## Summaries` 區塊。
+2. `summary` 條目必須寫在 `## Summaries` 標題下，不能寫到其他區塊。
+3. `concept` 條目必須寫在 `## Concepts` 標題下，不能混入 `## Summaries`。
+4. `## Summaries` 區塊中的每個 summary 條目都必須使用固定格式：`- [slug](./summaries/slug.md) · YYYY-MM-DD: description`
+5. 上述格式中的日期必須使用該 summary 被收錄進 LLM Wiki 的日期，也就是 `created`，不可改用來源原始發布日期。
+6. 若 `wiki/index.md` 尚未有 `## Summaries` 或 `## Concepts` 區塊，必須先補齊區塊，再插入條目。
+7. 若對應條目已存在，應更新原條目，不要重複新增。
+8. 不可只在 `wiki/log.md` 記錄 summary 變更而省略 `wiki/index.md`。
+9. 需要維護：
+   - `summaries/` 下新增或更新的頁面條目
+   - `concepts/` 下新增的概念頁條目
+   - 必要時更新一行描述，讓後續查詢能先靠 index 找路，再深入讀頁面
+
+欄位格式要求：
+
+1. `slug` 必須對應 summary 頁檔名，不含 `.md`。
+2. `path` 必須寫成 `./summaries/<slug>.md`。
+3. `description` 必須是一句可快速掃描的內容描述，說明這篇 summary 整理了什麼。
 
 條目描述應短、資訊密度高，方便快速掃描。
 
@@ -149,7 +163,8 @@
 2. 受影響的概念頁已更新，或已明確判斷無需更新。
 3. 主要交叉連結已補上。
 4. `wiki/index.md` 已更新。
-5. `wiki/log.md` 已追加紀錄。
+5. 若本次有新增或更新任何 `wiki/summaries/*.md`，則 `wiki/index.md` 的 `## Summaries` 區塊中必須已有對應條目，且格式正確。
+6. `wiki/log.md` 已追加紀錄。
 
 ## 不要做的事
 
