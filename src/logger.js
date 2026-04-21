@@ -11,6 +11,14 @@ export function toPreview(text) {
     return `${normalized.slice(0, MAX_LOG_PREVIEW_LENGTH)}...`;
 }
 
+export function toJsonPreview(value) {
+    try {
+        return toPreview(JSON.stringify(value));
+    } catch {
+        return toPreview(String(value));
+    }
+}
+
 export function logInfo(event, fields = {}) {
     console.log({ level: "info", event, ...fields });
 }

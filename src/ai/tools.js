@@ -3,6 +3,7 @@ import {
     fetchGithubFileTree,
     upsertGithubFile,
 } from "../github/client.js";
+import { toJsonPreview } from "../logger.js";
 const TOOL_GET_FILE_TREE = "get_file_tree";
 const TOOL_GET_FILE = "get_file";
 const TOOL_UPSERT_FILE = "upsert_file";
@@ -205,7 +206,7 @@ async function getFileTreeTool(args, { config, trace, logInfo }) {
     logInfo("tool.get_file_tree_return", {
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
-        resultPreview: JSON.stringify(result).slice(0, 1200),
+        resultPreview: toJsonPreview(result),
     });
     return result;
 }
@@ -233,7 +234,7 @@ async function getFileTool(args, { config, trace, logInfo }) {
     logInfo("tool.get_file_return", {
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
-        resultPreview: JSON.stringify(result).slice(0, 1200),
+        resultPreview: toJsonPreview(result),
     });
     return result;
 }
@@ -272,7 +273,7 @@ async function upsertFileTool(args, { config, trace, logInfo }) {
     logInfo("tool.upsert_file_return", {
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
-        resultPreview: JSON.stringify(result).slice(0, 1200),
+        resultPreview: toJsonPreview(result),
     });
     return result;
 }
@@ -323,7 +324,7 @@ async function appendFileTool(args, { config, trace, logInfo }) {
     logInfo("tool.append_file_return", {
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
-        resultPreview: JSON.stringify(result),
+        resultPreview: toJsonPreview(result),
     });
     return result;
 }
@@ -373,7 +374,7 @@ async function replaceInFileTool(args, { config, trace, logInfo }) {
     logInfo("tool.replace_in_file_return", {
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
-        resultPreview: JSON.stringify(result),
+        resultPreview: toJsonPreview(result),
     });
     return result;
 }

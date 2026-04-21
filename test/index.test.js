@@ -28,6 +28,7 @@ import {
   executeQueryToolCall,
   parseToolCallArguments,
 } from "../src/ai/tools.js";
+import { toJsonPreview } from "../src/logger.js";
 
 function encodeGithubContent(text) {
   return Buffer.from(text, "utf8").toString("base64");
@@ -60,6 +61,16 @@ test("buildDateVariants includes common date formats", () => {
   assert.ok(variants.includes("2026-04-19"));
   assert.ok(variants.includes("2026/4/19"));
   assert.ok(variants.includes("2026年4月19日"));
+});
+
+test("toJsonPreview truncates long serialized payloads", () => {
+  const preview = toJsonPreview({
+    content: "x".repeat(600),
+    nested: { value: "y".repeat(100) },
+  });
+
+  assert.ok(preview.length <= 283);
+  assert.match(preview, /\.\.\.$/);
 });
 
 test("GET / returns worker status", async () => {

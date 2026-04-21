@@ -8,7 +8,7 @@ import {
     parseToolCallArguments,
 } from "../ai/tools.js";
 import { extractAiText, extractSummaryReplyFromResult } from "../ai/response.js";
-import { logInfo, logWarn, toPreview } from "../logger.js";
+import { logInfo, logWarn, toJsonPreview, toPreview } from "../logger.js";
 
 const DEFAULT_MAX_TOKENS = 3072;
 const QUERY_AGENT_TIMEOUT_REPLY =
@@ -136,7 +136,7 @@ export async function runQueryAgent({
             requestId: trace.requestId,
             eventIndex: trace.eventIndex,
             round: round + 1,
-            outputRawPreview: JSON.stringify(result),
+            outputRawPreview: toJsonPreview(result),
             outputTextPreview: extractAiText(result),
         });
 
@@ -146,7 +146,7 @@ export async function runQueryAgent({
             eventIndex: trace.eventIndex,
             round: round + 1,
             toolCallCount: toolCalls.length,
-            outputRawPreview: toPreview(JSON.stringify(result)),
+            outputRawPreview: toJsonPreview(result),
             elapsedMs: Date.now() - startedAt,
         });
         if (toolCalls.length === 0) {
@@ -155,7 +155,7 @@ export async function runQueryAgent({
                 logWarn("ai.query_agent_empty_output", {
                     requestId: trace.requestId,
                     eventIndex: trace.eventIndex,
-                    outputRawPreview: toPreview(JSON.stringify(result)),
+                    outputRawPreview: toJsonPreview(result),
                     elapsedMs: Date.now() - startedAt,
                 });
                 return "目前有找到資料，但暫時無法整理成可讀回覆，請稍後再試。";
@@ -198,7 +198,7 @@ export async function runQueryAgent({
                 eventIndex: trace.eventIndex,
                 round: round + 1,
                 name,
-                argsPreview: JSON.stringify(args),
+                argsPreview: toJsonPreview(args),
             });
             let toolResult = null;
             try {
@@ -213,7 +213,7 @@ export async function runQueryAgent({
                     eventIndex: trace.eventIndex,
                     round: round + 1,
                     name,
-                    argsPreview: JSON.stringify(args),
+                    argsPreview: toJsonPreview(args),
                     errorMessage: error instanceof Error ? error.message : String(error),
                 });
                 if (isTimeoutLikeError(error)) {
@@ -230,7 +230,7 @@ export async function runQueryAgent({
                 eventIndex: trace.eventIndex,
                 round: round + 1,
                 name,
-                resultPreview: JSON.stringify(toolResult),
+                resultPreview: toJsonPreview(toolResult),
             });
             toolMessages.push({
                 role: "tool",
