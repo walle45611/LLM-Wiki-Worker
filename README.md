@@ -229,8 +229,8 @@ bun run deploy
 部署完成後，請手動把 Telegram webhook 設到 Worker，並帶上同一組 secret：
 
 ```bash
-curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-  -d "url=https://<your-worker-domain>/webhook" \
+curl -X POST "https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook" \
+  -d "url=https://your-domain.com/webhook" \
   -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
