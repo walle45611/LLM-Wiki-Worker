@@ -11,14 +11,14 @@ export function buildDateVariants(dateInfo) {
     ];
 }
 
-export function lineMatchesVariants(line, variants) {
-    return variants.some((variant) => line.includes(variant));
+export function textContainsAnyVariant(text, variants) {
+    return variants.some((variant) => text.includes(variant));
 }
 
 export function extractParagraphMatches(logContent, variants) {
     const sections = logContent.split(/\n{2,}/);
     const matches = sections.filter((section) =>
-        lineMatchesVariants(section, variants),
+        textContainsAnyVariant(section, variants),
     );
     return matches.join("\n\n").trim();
 }
@@ -33,7 +33,7 @@ export function extractLogForDate(logContent, dateInfo) {
 
     for (let index = 0; index < lines.length; index += 1) {
         const line = lines[index];
-        if (!lineMatchesVariants(line, variants)) {
+        if (!textContainsAnyVariant(line, variants)) {
             continue;
         }
 
@@ -46,14 +46,14 @@ export function extractLogForDate(logContent, dateInfo) {
 
             if (
                 genericDateLine.test(trimmed) &&
-                !lineMatchesVariants(nextLine, variants)
+                !textContainsAnyVariant(nextLine, variants)
             ) {
                 break;
             }
 
             if (
                 /^\s*#{1,6}\s+/.test(trimmed) &&
-                !lineMatchesVariants(nextLine, variants)
+                !textContainsAnyVariant(nextLine, variants)
             ) {
                 break;
             }
@@ -93,7 +93,10 @@ export function extractLogBlocksForDate(logContent, dateInfo) {
 
     for (const line of lines) {
         if (/^\s*##\s+/.test(line)) {
-            if (currentHeader && lineMatchesVariants(currentHeader, variants)) {
+            if (
+                currentHeader &&
+                textContainsAnyVariant(currentHeader, variants)
+            ) {
                 blocks.push([currentHeader, ...currentLines].join("\n").trim());
             }
             currentHeader = line;
@@ -106,7 +109,7 @@ export function extractLogBlocksForDate(logContent, dateInfo) {
         }
     }
 
-    if (currentHeader && lineMatchesVariants(currentHeader, variants)) {
+    if (currentHeader && textContainsAnyVariant(currentHeader, variants)) {
         blocks.push([currentHeader, ...currentLines].join("\n").trim());
     }
 

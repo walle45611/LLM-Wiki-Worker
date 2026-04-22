@@ -1,4 +1,4 @@
-import { normalizeWikiPath } from "../knowledge.js";
+import { buildDateVariants, normalizeWikiPath } from "../knowledge.js";
 
 export function getCompletionRejectionReason({
     reply,
@@ -85,37 +85,29 @@ function extractSummaryPathsForDateFromIndex(indexContent, dateInfo) {
     const paths = [];
     let inSummaries = false;
 
-    for (const line of lines) {
-        if (/^\s*##\s+Summaries\s*$/i.test(line)) {
+    for (const entry of lines) {
+        if (/^\s*##\s+Summaries\s*$/i.test(entry)) {
             inSummaries = true;
             continue;
         }
-        if (/^\s*##\s+/.test(line) && !/^\s*##\s+Summaries\s*$/i.test(line)) {
+        if (
+            /^\s*##\s+/.test(entry) &&
+            !/^\s*##\s+Summaries\s*$/i.test(entry)
+        ) {
             inSummaries = false;
             continue;
         }
         if (
             !inSummaries ||
-            !variants.some((variant) => line.includes(variant))
+            !variants.some((variant) => entry.includes(variant))
         ) {
             continue;
         }
-        const linkMatch = line.match(/\[[^\]]+\]\(([^)]+)\)/);
+        const linkMatch = entry.match(/\[[^\]]+\]\(([^)]+)\)/);
         if (linkMatch) {
             paths.push(normalizeWikiPath(linkMatch[1]));
         }
     }
 
     return Array.from(new Set(paths));
-}
-
-function buildDateVariants(dateInfo) {
-    return [
-        dateInfo.isoDate,
-        dateInfo.displayDate,
-        `${dateInfo.year}/${dateInfo.month}/${dateInfo.day}`,
-        `${dateInfo.year}-${dateInfo.month}-${dateInfo.day}`,
-        `${dateInfo.year}年${dateInfo.month}月${dateInfo.day}日`,
-        `${dateInfo.year}年${String(dateInfo.month).padStart(2, "0")}月${String(dateInfo.day).padStart(2, "0")}日`,
-    ];
 }
