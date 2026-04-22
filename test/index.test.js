@@ -83,42 +83,6 @@ test("GET / returns worker status", async () => {
     assert.deepEqual(payload, { ok: true, service: "llmwikiworker" });
 });
 
-test("GET / auto-registers telegram webhook when configured", async () => {
-    const requests = [];
-
-    await withMockedFetch(
-        async (url, init = {}) => {
-            requests.push({
-                url: String(url),
-                method: init.method || "GET",
-                body: String(init.body || ""),
-            });
-            return createJsonResponse({ ok: true, result: true });
-        },
-        async () => {
-            const response = await app.request(
-                "https://example.workers.dev/",
-                { method: "GET" },
-                {
-                    TELEGRAM_BOT_TOKEN: "telegram-token",
-                    TELEGRAM_WEBHOOK_SECRET: "expected-secret",
-                },
-            );
-
-            assert.equal(response.status, 200);
-        },
-    );
-
-    assert.equal(requests.length, 1);
-    assert.equal(
-        requests[0].url,
-        "https://api.telegram.org/bottelegram-token/setWebhook",
-    );
-    assert.equal(requests[0].method, "POST");
-    assert.match(requests[0].body, /url=https%3A%2F%2Fexample\.workers\.dev%2Fwebhook/);
-    assert.match(requests[0].body, /secret_token=expected-secret/);
-});
-
 test("POST /webhook rejects requests without telegram secret header", async () => {
     const response = await app.request(
         "http://localhost/webhook",

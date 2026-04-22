@@ -29,7 +29,6 @@ import { runQueryAgent } from "./flows/query-agent.js";
 import { buildUserErrorMessage, clampChatText } from "./chat/messages.js";
 import {
     createTelegramWebhookHandler,
-    ensureTelegramWebhook,
     sendTelegramMessage,
 } from "./telegram/client.js";
 
@@ -51,17 +50,6 @@ export {
 };
 
 export const app = new Hono();
-
-app.use("*", async (c, next) => {
-    if (new URL(c.req.url).pathname !== "/webhook") {
-        try {
-            await ensureTelegramWebhook(c.env, c.req.url);
-        } catch (error) {
-            logError("telegram.webhook_registration_failed", {}, error);
-        }
-    }
-    await next();
-});
 
 app.onError((error) => {
     logError("worker.unhandled_error", {}, error);
