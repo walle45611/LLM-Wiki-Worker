@@ -226,15 +226,14 @@ bunx wrangler secret put GITHUB_TOKEN
 bun run deploy
 ```
 
-部署完成後，請把 Telegram webhook 設到 Worker，並帶上同一組 secret token：
+部署完成後，Worker 會在第一個非 `/webhook` 請求進來時，自動把 Telegram webhook 設成目前 Worker 的 `/webhook`，並帶上同一組 secret：
 
 ```bash
-curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-  -d "url=https://<your-worker-domain>/webhook" \
-  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+# 例如部署後先打一個 health check
+curl "https://<your-worker-domain>/"
 ```
 
-Worker 會驗證 request header `X-Telegram-Bot-Api-Secret-Token` 是否等於 `TELEGRAM_WEBHOOK_SECRET`；不符就直接回 `401 Unauthorized`。
+Worker 會自動呼叫 Telegram `setWebhook`，把目標設成 `https://<your-worker-domain>/webhook`。之後 Telegram 送進來的 request 仍然會驗證 header `X-Telegram-Bot-Api-Secret-Token` 是否等於 `TELEGRAM_WEBHOOK_SECRET`；不符就直接回 `401 Unauthorized`。
 
 若你要在 Cloudflare Dashboard 直接維護變數，請確認以下 vars 與 `wrangler.jsonc` 一致：
 

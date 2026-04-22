@@ -3,6 +3,9 @@ import { maskChatId } from "../config/runtime.js";
 import { logInfo } from "../logger.js";
 import { buildTelegramMessage } from "../chat/messages.js";
 
+let webhookRegistrationKey = "";
+let webhookRegistrationPromise = null;
+
 export function createTelegramWebhookHandler(env, trace = {}) {
     const bot = new Bot(env.TELEGRAM_BOT_TOKEN);
 
@@ -60,6 +63,33 @@ export function createTelegramWebhookHandler(env, trace = {}) {
     return webhookCallback(bot, "hono");
 }
 
+export async function ensureTelegramWebhook(env, requestUrl) {
+    const botToken = String(env?.TELEGRAM_BOT_TOKEN || "").trim();
+    const webhookSecret = String(env?.TELEGRAM_WEBHOOK_SECRET || "").trim();
+    if (!botToken || !webhookSecret || !requestUrl) {
+        return;
+    }
+
+    const webhookUrl = new URL("/webhook", requestUrl).toString();
+    const registrationKey = `${webhookUrl}::${webhookSecret}`;
+    if (webhookRegistrationKey === registrationKey && webhookRegistrationPromise) {
+        return webhookRegistrationPromise;
+    }
+
+    webhookRegistrationKey = registrationKey;
+    webhookRegistrationPromise = registerTelegramWebhook(
+        botToken,
+        webhookUrl,
+        webhookSecret,
+    ).catch((error) => {
+        webhookRegistrationKey = "";
+        webhookRegistrationPromise = null;
+        throw error;
+    });
+
+    return webhookRegistrationPromise;
+}
+
 export async function sendTelegramMessage(chatId, text, botToken) {
     if (!botToken) {
         throw new Error("Missing TELEGRAM_BOT_TOKEN");
@@ -83,5 +113,36 @@ export async function sendTelegramMessage(chatId, text, botToken) {
         messageLength: message.length,
         messageId: response.message_id,
         elapsedMs: Date.now() - startedAt,
+    });
+}
+
+async function registerTelegramWebhook(botToken, webhookUrl, webhookSecret) {
+    const response = await fetch(
+        `https://api.telegram.org/bot${botToken}/setWebhook`,
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: new URLSearchParams({
+                url: webhookUrl,
+                secret_token: webhookSecret,
+            }),
+        },
+    );
+
+    if (!response.ok) {
+        throw new Error(`Telegram setWebhook failed with status ${response.status}`);
+    }
+
+    const payload = await response.json();
+    if (!payload?.ok) {
+        throw new Error(
+            `Telegram setWebhook failed: ${payload?.description || "unknown error"}`,
+        );
+    }
+
+    logInfo("telegram.webhook_registered", {
+        webhookUrl,
     });
 }
