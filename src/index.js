@@ -9,8 +9,8 @@ import {
     buildScheduledQuery,
     getRuntimeConfig,
     getScheduledDate,
-    maskLineUserId,
-    requireLineTargetUserId,
+    maskChatId,
+    requireTelegramTargetChatId,
 } from "./config/runtime.js";
 import { fetchGithubFile } from "./github/client.js";
 import {
@@ -24,19 +24,18 @@ import {
 } from "./knowledge.js";
 import { logError, logInfo, logWarn, toPreview } from "./logger.js";
 import { runQueryAgent } from "./flows/query-agent.js";
+import { buildUserErrorMessage, clampChatText } from "./chat/messages.js";
 import {
-    timingSafeEqual,
-    verifyLineSignature,
-} from "./line/signature.js";
-import { pushToLineUser, replyToLine } from "./line/client.js";
-import { buildUserErrorMessage, clampLineText } from "./line/messages.js";
+    createTelegramWebhookHandler,
+    sendTelegramMessage,
+} from "./telegram/client.js";
 
 export { extractAiText, extractSummaryReplyFromResult, fetchGithubFile };
 export {
     buildDateInfoFromIsoDate,
     buildDateVariants,
     buildUserErrorMessage,
-    clampLineText,
+    clampChatText,
     detectReadingLookupDateFromText,
     extractLogForDate,
     extractSummaryReferencesFromLog,
@@ -46,8 +45,6 @@ export {
     parseSummaryIndexEntries,
     resolveSummaryPathsForDate,
     runQueryAgent,
-    timingSafeEqual,
-    verifyLineSignature,
 };
 
 export const app = new Hono();
@@ -63,165 +60,53 @@ app.post("/webhook", async (c) => {
     const requestId = crypto.randomUUID();
     const startedAt = Date.now();
     const bodyText = await c.req.text();
-    const signature = c.req.header("x-line-signature");
     logInfo("webhook.received", {
         requestId,
         bodyLength: bodyText.length,
-        hasSignature: Boolean(signature),
     });
 
-    if (
-        !(await verifyLineSignature(
-            bodyText,
-            signature,
-            c.env.LINE_CHANNEL_SECRET,
-        ))
-    ) {
-        logWarn("webhook.signature_failed", { requestId });
-        return c.text("Unauthorized", 401);
+    let payload = null;
+    try {
+        payload = JSON.parse(bodyText);
+    } catch (error) {
+        logWarn("webhook.invalid_payload", {
+            requestId,
+            errorMessage: error instanceof Error ? error.message : String(error),
+        });
+        return c.text("Bad Request", 400);
     }
 
-    const payload = JSON.parse(bodyText);
-    const events = Array.isArray(payload.events) ? payload.events : [];
-    logInfo("webhook.parsed", { requestId, eventCount: events.length });
+    logInfo("webhook.parsed", {
+        requestId,
+        updateId: payload?.update_id || 0,
+        hasMessage: Boolean(payload?.message),
+    });
 
-    await Promise.all(
-        events.map((event, index) =>
-            handleLineEvent(event, c.env, {
-                requestId,
-                eventIndex: index,
-                totalEvents: events.length,
-            }),
-        ),
-    );
+    const handler = createTelegramWebhookHandler(c.env, {
+        requestId,
+        eventIndex: 0,
+    });
+    const response = await handler(c);
     logInfo("webhook.completed", {
         requestId,
         elapsedMs: Date.now() - startedAt,
     });
-    logInfo("webhook.accepted", {
-        requestId,
-        eventCount: events.length,
-        elapsedMs: Date.now() - startedAt,
-    });
-    return c.text("OK", 200);
+    return response;
 });
 
 export const worker = {
     fetch: app.fetch,
     scheduled: handleScheduledSummary,
-    queue: handleLineQueryQueue,
+    queue: handleQueryQueue,
 };
 
 export default worker;
 
-export async function handleLineEvent(event, env, trace = {}) {
-    const eventStartedAt = Date.now();
-    logInfo("line.event_received", {
-        requestId: trace.requestId,
-        eventIndex: trace.eventIndex,
-        totalEvents: trace.totalEvents,
-        type: event?.type,
-        messageType: event?.message?.type,
-        hasReplyToken: Boolean(event?.replyToken),
-        sourceType: event?.source?.type || "",
-        sourceUserIdPreview: maskLineUserId(event?.source?.userId || ""),
-    });
-
-    if (
-        !event?.replyToken ||
-        event.replyToken === "00000000000000000000000000000000"
-    ) {
-        logWarn("line.invalid_reply_token", {
-            requestId: trace.requestId,
-            eventIndex: trace.eventIndex,
-        });
-        return;
-    }
-
-    if (event.type !== "message" || event.message?.type !== "text") {
-        logInfo("line.unsupported_message", {
-            requestId: trace.requestId,
-            eventIndex: trace.eventIndex,
-        });
-        return replyToLine(
-            event.replyToken,
-            "目前只支援文字訊息。",
-            env.LINE_CHANNEL_ACCESS_TOKEN,
-        );
-    }
-
-    const text = event.message.text.trim();
-    const sourceUserId = String(event?.source?.userId || "").trim();
-    if (!sourceUserId) {
-        logWarn("line.queue_missing_user_id", {
-            requestId: trace.requestId,
-            eventIndex: trace.eventIndex,
-        });
-        return replyToLine(
-            event.replyToken,
-            "目前僅支援一對一聊天查詢。",
-            env.LINE_CHANNEL_ACCESS_TOKEN,
-        );
-    }
-
-    try {
-        const config = getRuntimeConfig(env);
-        logInfo("line.queue_runtime_config_loaded", {
-            requestId: trace.requestId,
-            eventIndex: trace.eventIndex,
-            githubOwner: config.githubOwner,
-            githubRepo: config.githubRepo,
-            githubRef: config.githubRef,
-            timezone: config.timezone,
-            aiModel: config.aiModel,
-            eventTimeoutMs: config.eventTimeoutMs,
-        });
-        await env.LLM_WIKI_QUEUE.send({
-            type: "line_text_query",
-            requestId: trace.requestId || crypto.randomUUID(),
-            eventIndex: trace.eventIndex ?? 0,
-            text,
-            sourceUserId,
-            queuedAt: Date.now(),
-        });
-        logInfo("line.queue_enqueued", {
-            requestId: trace.requestId,
-            eventIndex: trace.eventIndex,
-            sourceUserIdPreview: maskLineUserId(sourceUserId),
-            textPreview: toPreview(text),
-            totalElapsedMs: Date.now() - eventStartedAt,
-        });
-        return;
-    } catch (error) {
-        logError(
-            "line.handle_failed",
-            {
-                requestId: trace.requestId,
-                eventIndex: trace.eventIndex,
-                totalElapsedMs: Date.now() - eventStartedAt,
-            },
-            error,
-        );
-        const fallbackMessage = "目前系統忙碌，請稍後再試。";
-        await replyToLine(
-            event.replyToken,
-            fallbackMessage,
-            env.LINE_CHANNEL_ACCESS_TOKEN,
-        );
-        logInfo("line.reply_fallback_completed", {
-            requestId: trace.requestId,
-            eventIndex: trace.eventIndex,
-            replyLength: fallbackMessage.length,
-            totalElapsedMs: Date.now() - eventStartedAt,
-        });
-    }
-}
-
-export async function handleLineQueryQueue(batch, env) {
+export async function handleQueryQueue(batch, env) {
     for (const message of batch.messages) {
         const job = message.body || {};
-        if (!["line_text_query", "scheduled_summary"].includes(job.type)) {
-            logWarn("line.queue_unknown_job_type", {
+        if (!["telegram_text_query", "scheduled_summary"].includes(job.type)) {
+            logWarn("queue.unknown_job_type", {
                 requestId: job.requestId || "",
                 type: String(job.type || ""),
             });
@@ -244,23 +129,20 @@ export async function handleLineQueryQueue(batch, env) {
                     ? new Date(scheduledTime)
                     : undefined;
             currentDateInfo = getCurrentDateInfo(config.timezone, currentDate);
-            const text = String(job.text || "").trim();
-            const userId =
-                job.type === "scheduled_summary"
-                    ? String(job.targetUserId || "").trim()
-                    : String(job.sourceUserId || "").trim();
-            if (!text || !userId) {
-                throw new Error("Invalid queue payload: missing text or sourceUserId");
+            const userPrompt = String(job.text || "").trim();
+            const chatId = String(job.chatId || "").trim();
+            if (!userPrompt || !chatId) {
+                throw new Error("Invalid queue payload: missing text or chatId");
             }
 
             const eventPrefix =
                 job.type === "scheduled_summary"
                     ? "scheduled_queue"
-                    : "line_queue";
+                    : "telegram_queue";
             logInfo(`${eventPrefix}.user_query`, {
                 requestId: trace.requestId,
                 eventIndex: trace.eventIndex,
-                textPreview: toPreview(text),
+                textPreview: toPreview(userPrompt),
                 currentDate: currentDateInfo.isoDate,
             });
             logInfo(`${eventPrefix}.agent_timeout_selected`, {
@@ -268,10 +150,7 @@ export async function handleLineQueryQueue(batch, env) {
                 eventIndex: trace.eventIndex,
                 timeoutMs: config.eventTimeoutMs,
             });
-            const userPrompt =
-                eventPrefix === "scheduled_queue"
-                    ? text
-                    : `你是 LLM-Wiki-Worker，${text}`;
+
             const rawReply = await runQueryAgent({
                 userPrompt,
                 aiBinding: env.AI,
@@ -281,7 +160,7 @@ export async function handleLineQueryQueue(batch, env) {
                 timeoutMs: config.eventTimeoutMs,
                 currentDateInfo,
             });
-            const reply = clampLineText(rawReply);
+            const reply = clampChatText(rawReply);
             logInfo(`${eventPrefix}.summary_generated`, {
                 requestId: trace.requestId,
                 eventIndex: trace.eventIndex,
@@ -292,17 +171,21 @@ export async function handleLineQueryQueue(batch, env) {
                 currentDate: currentDateInfo.isoDate,
             });
 
-            await pushToLineUser(userId, reply, env.LINE_CHANNEL_ACCESS_TOKEN);
+            await sendTelegramMessage(
+                chatId,
+                reply,
+                config.telegramBotToken,
+            );
             logInfo(
                 job.type === "scheduled_summary"
                     ? "scheduled.queue_job_completed"
-                    : "line.queue_job_completed",
+                    : "telegram.queue_job_completed",
                 {
-                requestId: trace.requestId,
-                eventIndex: trace.eventIndex,
-                sourceUserIdPreview: maskLineUserId(userId),
-                replyLength: reply.length,
-                totalElapsedMs: Date.now() - startedAt,
+                    requestId: trace.requestId,
+                    eventIndex: trace.eventIndex,
+                    chatIdPreview: maskChatId(chatId),
+                    replyLength: reply.length,
+                    totalElapsedMs: Date.now() - startedAt,
                 },
             );
             message.ack();
@@ -310,7 +193,7 @@ export async function handleLineQueryQueue(batch, env) {
             logError(
                 job.type === "scheduled_summary"
                     ? "scheduled.queue_job_failed"
-                    : "line.queue_job_failed",
+                    : "telegram.queue_job_failed",
                 {
                     requestId: trace.requestId,
                     eventIndex: trace.eventIndex,
@@ -319,33 +202,35 @@ export async function handleLineQueryQueue(batch, env) {
                 error,
             );
 
-            const fallbackMessage = clampLineText(
+            const fallbackMessage = clampChatText(
                 buildUserErrorMessage(error, currentDateInfo),
             );
-            const userId =
-                job.type === "scheduled_summary"
-                    ? String(job.targetUserId || "").trim()
-                    : String(job.sourceUserId || "").trim();
-            if (userId) {
+            const chatId = String(job.chatId || "").trim();
+            if (chatId) {
                 try {
-                    await pushToLineUser(userId, fallbackMessage, env.LINE_CHANNEL_ACCESS_TOKEN);
+                    const config = getRuntimeConfig(env);
+                    await sendTelegramMessage(
+                        chatId,
+                        fallbackMessage,
+                        config.telegramBotToken,
+                    );
                     logInfo(
                         job.type === "scheduled_summary"
                             ? "scheduled.queue_job_fallback_pushed"
-                            : "line.queue_job_fallback_pushed",
+                            : "telegram.queue_job_fallback_pushed",
                         {
-                        requestId: trace.requestId,
-                        eventIndex: trace.eventIndex,
-                        sourceUserIdPreview: maskLineUserId(userId),
-                        replyLength: fallbackMessage.length,
-                        totalElapsedMs: Date.now() - startedAt,
+                            requestId: trace.requestId,
+                            eventIndex: trace.eventIndex,
+                            chatIdPreview: maskChatId(chatId),
+                            replyLength: fallbackMessage.length,
+                            totalElapsedMs: Date.now() - startedAt,
                         },
                     );
                 } catch (pushError) {
                     logError(
                         job.type === "scheduled_summary"
                             ? "scheduled.queue_job_fallback_failed"
-                            : "line.queue_job_fallback_failed",
+                            : "telegram.queue_job_fallback_failed",
                         {
                             requestId: trace.requestId,
                             eventIndex: trace.eventIndex,
@@ -366,14 +251,17 @@ export async function handleScheduledSummary(controller, env) {
     try {
         const config = getRuntimeConfig(env);
         const scheduledDate = getScheduledDate(controller);
-        const currentDateInfo = getCurrentDateInfo(config.timezone, scheduledDate);
-        const targetUserId = requireLineTargetUserId(config);
+        const currentDateInfo = getCurrentDateInfo(
+            config.timezone,
+            scheduledDate,
+        );
+        const chatId = requireTelegramTargetChatId(config);
         const text = buildScheduledQuery(currentDateInfo);
         logInfo("scheduled.received", {
             requestId,
             cron: String(controller?.cron || ""),
             scheduledTime: controller?.scheduledTime || 0,
-            targetUserIdPreview: maskLineUserId(targetUserId),
+            chatIdPreview: maskChatId(chatId),
             currentDate: currentDateInfo.isoDate,
         });
         logInfo("scheduled.runtime_config_loaded", {
@@ -391,14 +279,14 @@ export async function handleScheduledSummary(controller, env) {
             requestId,
             eventIndex: 0,
             text,
-            targetUserId,
+            chatId,
             scheduledTime: scheduledDate.getTime(),
             queuedAt: Date.now(),
         });
 
         logInfo("scheduled.enqueued", {
             requestId,
-            targetUserIdPreview: maskLineUserId(targetUserId),
+            chatIdPreview: maskChatId(chatId),
             textPreview: toPreview(text),
             totalElapsedMs: Date.now() - startedAt,
         });

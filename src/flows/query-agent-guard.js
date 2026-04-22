@@ -6,9 +6,8 @@ export function getCompletionRejectionReason({
     successfulFileReads,
     toolFailures,
 }) {
-    const markdownIssue = detectReplyFormatIssue(reply);
-    if (markdownIssue) {
-        return `你剛才的最終回覆不符合 output-rules。${markdownIssue}請改成純文字 zh-TW 回覆，不可用 Markdown，並保留任務需要的資訊密度。`;
+    if (!String(reply || "").trim()) {
+        return "你剛才的最終回覆是空的。請重新產出完整回覆。";
     }
 
     const reviewIssue = getSingleDateReviewIssue(
@@ -78,26 +77,6 @@ function getSingleDateReviewIssue(
     }
 
     return `你正在處理單日閱讀回顧 ${singleDateReviewInfo.isoDate}，而 \`wiki/index.md\` 沒有命中任何 summary。依 review-rules，這種情況只能回覆：${noDataReply}`;
-}
-
-function detectReplyFormatIssue(reply) {
-    const text = String(reply || "").trim();
-    if (!text) {
-        return "回覆是空的。";
-    }
-    if (/^\s*#{1,6}\s+/m.test(text)) {
-        return "你使用了 Markdown 標題。";
-    }
-    if (/\*\*[^*]+\*\*|__[^_]+__/.test(text)) {
-        return "你使用了 Markdown 粗體。";
-    }
-    if (/\[[^\]]+\]\([^)]+\)/.test(text)) {
-        return "你使用了 Markdown 連結。";
-    }
-    if (/^\s*[-*+]\s+/m.test(text) || /^\s*\d+\.\s+/m.test(text)) {
-        return "你使用了 Markdown 清單。";
-    }
-    return "";
 }
 
 function extractSummaryPathsForDateFromIndex(indexContent, dateInfo) {

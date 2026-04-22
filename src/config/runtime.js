@@ -1,16 +1,14 @@
-export const LINE_REPLY_ENDPOINT = "https://api.line.me/v2/bot/message/reply";
-export const LINE_PUSH_ENDPOINT = "https://api.line.me/v2/bot/message/push";
 export const AGENTS_PATH = "AGENTS.md";
 export const DEFAULT_AI_MODEL = "@cf/openai/gpt-oss-20b";
-export function buildScheduledQuery(currentDateInfo) {
+export const EVENT_TIMEOUT_MS = 120000;
+
+export function buildScheduledQuery(_currentDateInfo) {
     return "排程任務需要把當天整理結果寫入知識庫";
 }
-export const EVENT_TIMEOUT_MS = 120000;
 
 export function getRuntimeConfig(env) {
     const required = [
-        "LINE_CHANNEL_ACCESS_TOKEN",
-        "LINE_CHANNEL_SECRET",
+        "TELEGRAM_BOT_TOKEN",
         "GITHUB_OWNER",
         "GITHUB_REPO",
         "GITHUB_TOKEN",
@@ -28,19 +26,20 @@ export function getRuntimeConfig(env) {
         githubRef: env.GITHUB_REF || "main",
         githubToken: env.GITHUB_TOKEN,
         timezone: env.APP_TIMEZONE || "Asia/Taipei",
-        lineTargetUserId: env.LINE_TARGET_USER_ID || "",
+        telegramBotToken: env.TELEGRAM_BOT_TOKEN,
+        telegramTargetChatId: env.TELEGRAM_TARGET_CHAT_ID || "",
         aiModel: env.AI_MODEL || DEFAULT_AI_MODEL,
         eventTimeoutMs: EVENT_TIMEOUT_MS,
     };
 }
 
-export function requireLineTargetUserId(config) {
-    if (!config.lineTargetUserId) {
+export function requireTelegramTargetChatId(config) {
+    if (!config.telegramTargetChatId) {
         throw new Error(
-            "Missing required environment variable: LINE_TARGET_USER_ID",
+            "Missing required environment variable: TELEGRAM_TARGET_CHAT_ID",
         );
     }
-    return config.lineTargetUserId;
+    return config.telegramTargetChatId;
 }
 
 export function getScheduledDate(controller) {
@@ -51,8 +50,8 @@ export function getScheduledDate(controller) {
     return new Date();
 }
 
-export function maskLineUserId(userId) {
-    const normalized = String(userId || "");
+export function maskChatId(chatId) {
+    const normalized = String(chatId || "");
     if (normalized.length <= 8) {
         return normalized;
     }

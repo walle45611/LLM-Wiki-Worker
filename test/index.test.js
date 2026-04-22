@@ -1,12 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
 
 import {
     app,
     buildDateVariants,
     buildUserErrorMessage,
-    clampLineText,
+    clampChatText,
     detectReadingLookupDateFromText,
     extractAiText,
     extractSummaryReplyFromResult,
@@ -19,8 +18,6 @@ import {
     parseSummaryIndexEntries,
     resolveSummaryPathsForDate,
     runQueryAgent,
-    timingSafeEqual,
-    verifyLineSignature,
 } from "../src/index.js";
 import { getRuntimeConfig } from "../src/config/runtime.js";
 import { fetchGithubFile } from "../src/github/client.js";
@@ -269,7 +266,10 @@ test("detectReadingLookupDateFromText parses relative date for reading query", (
     assert.equal(isoDate, "2026-04-18");
 });
 
-test("runQueryAgent forces single-day review to read matched summaries before finishing", async () => {
+test(
+    "runQueryAgent forces single-day review to read matched summaries before finishing",
+    { concurrency: false },
+    async () => {
     const requests = [];
     const aiRequests = [];
     const indexContent = [
@@ -290,12 +290,12 @@ test("runQueryAgent forces single-day review to read matched summaries before fi
     await withMockedFetch(
         async (url) => {
             requests.push(String(url));
-            if (String(url).includes("/wiki/index.md?ref=")) {
+            if (String(url).includes("index.md")) {
                 return createJsonResponse({
                     content: encodeGithubContent(indexContent),
                 });
             }
-            if (String(url).includes("/wiki/summaries/alpha.md?ref=")) {
+            if (String(url).includes("alpha.md")) {
                 return createJsonResponse({
                     content: encodeGithubContent(summaryContent),
                 });
@@ -304,7 +304,7 @@ test("runQueryAgent forces single-day review to read matched summaries before fi
         },
         async () => {
             const reply = await runQueryAgent({
-                userPrompt: "你是 LLM-Wiki-Worker，今天閱讀了什麼",
+                userPrompt: "今天閱讀了什麼",
                 aiBinding: {
                     async run(_model, payload) {
                         aiRequests.push(payload);
@@ -390,26 +390,19 @@ test("runQueryAgent forces single-day review to read matched summaries before fi
             );
         },
     );
-});
+    },
+);
 
-test("runQueryAgent rejects markdown final replies and asks model to rewrite", async () => {
-    const aiRequests = [];
+test("runQueryAgent accepts markdown final replies", async () => {
     let callCount = 0;
 
     const reply = await runQueryAgent({
-        userPrompt: "你是 LLM-Wiki-Worker，幫我整理今天的重點",
+        userPrompt: "幫我整理今天的重點",
         aiBinding: {
-            async run(_model, payload) {
-                aiRequests.push(payload);
+            async run() {
                 callCount += 1;
-                if (callCount === 1) {
-                    return {
-                        response: "## 標題\n- 第一點\n- 第二點",
-                    };
-                }
                 return {
-                    response:
-                        "📌 今天的重點有兩項：第一，流程已完成。第二，還需要補一個測試。",
+                    response: "## 標題\n- 第一點\n- 第二點",
                 };
             },
         },
@@ -433,9 +426,8 @@ test("runQueryAgent rejects markdown final replies and asks model to rewrite", a
         },
     });
 
-    assert.match(reply, /今天的重點有兩項/);
-    assert.equal(aiRequests.length, 2);
-    assert.match(aiRequests[1].messages.at(-1).content, /不符合 output-rules/);
+    assert.match(reply, /## 標題/);
+    assert.equal(callCount, 1);
 });
 
 test("extractAiText supports common Workers AI shapes", () => {
@@ -497,22 +489,22 @@ test("extractSummaryReplyFromResult rejects numeric garbage", () => {
     assert.equal(reply, "");
 });
 
-test("clampLineText truncates oversized LINE replies", () => {
+test("clampChatText truncates oversized replies", () => {
     const longText = "a".repeat(4600);
-    const clamped = clampLineText(longText);
+    const clamped = clampChatText(longText);
 
-    assert.ok(clamped.length <= 4500);
+    assert.ok(clamped.length <= 3500);
     assert.match(clamped, /\[內容已截斷\]$/);
 });
 
-test("clampLineText strips markdown syntax for LINE replies", () => {
-    const clamped = clampLineText(
+test("clampChatText preserves markdown content before telegram escaping", () => {
+    const clamped = clampChatText(
         "# Title\n\n**bold** [link](https://example.com)\n- item\n1. first\n`code`",
     );
 
     assert.equal(
         clamped,
-        "Title\n\nbold link https://example.com\nitem\nfirst\ncode",
+        "# Title\n\n**bold** [link](https://example.com)\n- item\n1. first\n`code`",
     );
 });
 
@@ -529,9 +521,8 @@ test("buildUserErrorMessage returns a specific message for Workers AI daily limi
 test("handleScheduledSummary enqueues scheduled summary job", async () => {
     const queuedJobs = [];
     const env = {
-        LINE_CHANNEL_ACCESS_TOKEN: "line-token",
-        LINE_CHANNEL_SECRET: "line-secret",
-        LINE_TARGET_USER_ID: "U1234567890abcdef",
+        TELEGRAM_BOT_TOKEN: "telegram-token",
+        TELEGRAM_TARGET_CHAT_ID: "123456789",
         GITHUB_OWNER: "walle4561",
         GITHUB_REPO: "LLM-Wiki",
         GITHUB_TOKEN: "github-token",
@@ -554,15 +545,14 @@ test("handleScheduledSummary enqueues scheduled summary job", async () => {
 
     assert.equal(queuedJobs.length, 1);
     assert.equal(queuedJobs[0].type, "scheduled_summary");
-    assert.equal(queuedJobs[0].targetUserId, "U1234567890abcdef");
+    assert.equal(queuedJobs[0].chatId, "123456789");
     assert.equal(queuedJobs[0].text, "排程任務需要把當天整理結果寫入知識庫");
 });
 
 test("handleScheduledSummary throws when queue enqueue fails", async () => {
     const env = {
-        LINE_CHANNEL_ACCESS_TOKEN: "line-token",
-        LINE_CHANNEL_SECRET: "line-secret",
-        LINE_TARGET_USER_ID: "U1234567890abcdef",
+        TELEGRAM_BOT_TOKEN: "telegram-token",
+        TELEGRAM_TARGET_CHAT_ID: "123456789",
         GITHUB_OWNER: "walle4561",
         GITHUB_REPO: "LLM-Wiki",
         GITHUB_TOKEN: "github-token",
@@ -587,10 +577,9 @@ test("handleScheduledSummary throws when queue enqueue fails", async () => {
     );
 });
 
-test("handleScheduledSummary requires LINE_TARGET_USER_ID", async () => {
+test("handleScheduledSummary requires TELEGRAM_TARGET_CHAT_ID", async () => {
     const env = {
-        LINE_CHANNEL_ACCESS_TOKEN: "line-token",
-        LINE_CHANNEL_SECRET: "line-secret",
+        TELEGRAM_BOT_TOKEN: "telegram-token",
         GITHUB_OWNER: "walle4561",
         GITHUB_REPO: "LLM-Wiki",
         GITHUB_TOKEN: "github-token",
@@ -609,30 +598,7 @@ test("handleScheduledSummary requires LINE_TARGET_USER_ID", async () => {
             },
             env,
         ),
-        /LINE_TARGET_USER_ID/,
-    );
-});
-
-test("timingSafeEqual matches exact strings only", () => {
-    assert.equal(timingSafeEqual("abc", "abc"), true);
-    assert.equal(timingSafeEqual("abc", "abd"), false);
-    assert.equal(timingSafeEqual("abc", "ab"), false);
-});
-
-test("verifyLineSignature validates LINE webhook signatures", async () => {
-    const body = JSON.stringify({ hello: "world" });
-    const secret = "test-secret";
-    const signature = createHmac("sha256", secret)
-        .update(body)
-        .digest("base64");
-
-    await assert.equal(
-        await verifyLineSignature(body, signature, secret),
-        true,
-    );
-    await assert.equal(
-        await verifyLineSignature(body, "bad-signature", secret),
-        false,
+        /TELEGRAM_TARGET_CHAT_ID/,
     );
 });
 
@@ -650,8 +616,7 @@ test("getCurrentDateInfo returns timezone based date parts", () => {
 
 test("getRuntimeConfig uses fixed summary timeout from code", () => {
     const baseEnv = {
-        LINE_CHANNEL_ACCESS_TOKEN: "token",
-        LINE_CHANNEL_SECRET: "secret",
+        TELEGRAM_BOT_TOKEN: "token",
         GITHUB_OWNER: "owner",
         GITHUB_REPO: "repo",
         GITHUB_TOKEN: "github-token",

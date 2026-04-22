@@ -42,7 +42,7 @@
     },
     "vars": {
         "APP_TIMEZONE": "Asia/Taipei",
-        "LINE_TARGET_USER_ID": "Ua81fe50439a44728125caf476d7693a0",
+        "TELEGRAM_TARGET_CHAT_ID": "",
         "GITHUB_OWNER": "walle4561",
         "GITHUB_REPO": "LLM-Wiki",
         "GITHUB_REF": "main",

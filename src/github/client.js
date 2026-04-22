@@ -1,15 +1,15 @@
-const GITHUB_API_BASE = "https://api.github.com";
+import { Octokit } from "octokit";
+
 const GITHUB_FETCH_TIMEOUT_MS = 15000;
 const GITHUB_TREE_TOTAL_TIMEOUT_MS = 12000;
 const GITHUB_TREE_MAX_ENTRIES = 400;
+const GITHUB_API_VERSION = "2022-11-28";
+const GITHUB_USER_AGENT = "llmwikiworker";
 
 export async function fetchGithubFile(config, filePath, options = {}) {
     const { logInfo, timeoutMs } = options;
-    const encodedPath = filePath
-        .split("/")
-        .map((segment) => encodeURIComponent(segment))
-        .join("/");
-    const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(config.githubOwner)}/${encodeURIComponent(config.githubRepo)}/contents/${encodedPath}?ref=${encodeURIComponent(config.githubRef)}`;
+    const requestTimeoutMs = timeoutMs ?? GITHUB_FETCH_TIMEOUT_MS;
+    const octokit = createOctokit(config, requestTimeoutMs);
     logInfo?.("github.fetch_started", {
         owner: config.githubOwner,
         repo: config.githubRepo,
@@ -20,12 +20,7 @@ export async function fetchGithubFile(config, filePath, options = {}) {
     const startedAt = Date.now();
     let response = null;
     try {
-        response = await fetchWithTimeout(
-            url,
-            config.githubToken,
-            filePath,
-            timeoutMs,
-        );
+        response = await requestGithubContents(octokit, config, filePath);
     } catch (error) {
         logInfo?.("github.fetch_failed", {
             path: filePath,
@@ -33,7 +28,7 @@ export async function fetchGithubFile(config, filePath, options = {}) {
             errorMessage:
                 error instanceof Error ? error.message : String(error),
         });
-        throw error;
+        throw mapGithubFetchError(error, filePath, requestTimeoutMs);
     }
     logInfo?.("github.fetch_response", {
         path: filePath,
@@ -41,26 +36,12 @@ export async function fetchGithubFile(config, filePath, options = {}) {
         elapsedMs: Date.now() - startedAt,
     });
 
-    if (response.status === 404) {
-        throw new Error(`GitHub file not found: ${filePath}`);
-    }
-    if (response.status === 401 || response.status === 403) {
-        throw new Error("GitHub authentication failed");
-    }
-    if (!response.ok) {
-        throw new Error(`GitHub API failed with status ${response.status}`);
-    }
-
-    const payload = await response.json();
+    const payload = response.data;
     if (!payload?.content) {
         throw new Error("GitHub API returned empty file content");
     }
 
-    const normalized = payload.content.replace(/\n/g, "");
-    const bytes = Uint8Array.from(atob(normalized), (char) =>
-        char.charCodeAt(0),
-    );
-    const decoded = new TextDecoder().decode(bytes);
+    const decoded = decodeGithubContent(payload.content, payload.encoding);
     logInfo?.("github.fetch_decoded", {
         path: filePath,
         length: decoded.length,
@@ -75,41 +56,42 @@ export async function upsertGithubFile(
     options = {},
 ) {
     const { logInfo, commitMessage } = options;
-    const encodedPath = filePath
-        .split("/")
-        .map((segment) => encodeURIComponent(segment))
-        .join("/");
-    const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(config.githubOwner)}/${encodeURIComponent(config.githubRepo)}/contents/${encodedPath}`;
     const message =
         String(commitMessage || "").trim() || `chore: update ${filePath}`;
+    const octokit = createOctokit(config, GITHUB_FETCH_TIMEOUT_MS);
 
     let sha = null;
     try {
-        const existingResponse = await fetchWithTimeout(
-            `${url}?ref=${encodeURIComponent(config.githubRef)}`,
-            config.githubToken,
+        const existingResponse = await requestGithubContents(
+            octokit,
+            config,
             filePath,
-            GITHUB_FETCH_TIMEOUT_MS,
         );
-        if (existingResponse.ok) {
-            const payload = await existingResponse.json();
-            sha = typeof payload?.sha === "string" ? payload.sha : null;
-        }
+        sha =
+            typeof existingResponse.data?.sha === "string"
+                ? existingResponse.data.sha
+                : null;
     } catch (error) {
-        logInfo?.("github.upsert_lookup_failed", {
-            path: filePath,
-            errorMessage:
-                error instanceof Error ? error.message : String(error),
-        });
+        const status = getGithubStatus(error);
+        if (status !== 404) {
+            logInfo?.("github.upsert_lookup_failed", {
+                path: filePath,
+                errorMessage:
+                    error instanceof Error ? error.message : String(error),
+            });
+        }
     }
 
-    const body = {
+    const params = {
+        owner: config.githubOwner,
+        repo: config.githubRepo,
+        path: filePath,
         message,
-        content: btoa(unescape(encodeURIComponent(String(content || "")))),
+        content: encodeGithubContent(content),
         branch: config.githubRef,
     };
     if (sha) {
-        body.sha = sha;
+        params.sha = sha;
     }
 
     logInfo?.("github.upsert_started", {
@@ -117,23 +99,22 @@ export async function upsertGithubFile(
         hasExistingSha: Boolean(sha),
         message,
     });
-    const response = await fetchWithTimeout(
-        url,
-        config.githubToken,
-        filePath,
-        GITHUB_FETCH_TIMEOUT_MS,
-        {
-            method: "PUT",
-            body: JSON.stringify(body),
-        },
-    );
-    if (!response.ok) {
-        const text = await safeReadResponseText(response);
+
+    let response = null;
+    try {
+        response = await octokit.request(
+            "PUT /repos/{owner}/{repo}/contents/{path}",
+            params,
+        );
+    } catch (error) {
+        const status = getGithubStatus(error);
+        const messageText = extractGithubErrorText(error);
         throw new Error(
-            `GitHub upsert failed with status ${response.status}: ${text}`,
+            `GitHub upsert failed with status ${status || "unknown"}: ${messageText}`,
         );
     }
-    const payload = await response.json();
+
+    const payload = response.data;
     logInfo?.("github.upsert_completed", {
         path: filePath,
         contentSha: payload?.content?.sha || "",
@@ -212,24 +193,10 @@ async function walkGithubDir(
         depth,
         elapsedMs: Date.now() - startedAt,
     });
-    const encodedPath = path
-        .split("/")
-        .filter(Boolean)
-        .map((segment) => encodeURIComponent(segment))
-        .join("/");
-    const contentsPath = encodedPath ? `/${encodedPath}` : "";
-    const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(config.githubOwner)}/${encodeURIComponent(config.githubRepo)}/contents${contentsPath}?ref=${encodeURIComponent(config.githubRef)}`;
-    const response = await fetchWithTimeout(
-        url,
-        config.githubToken,
-        path,
-        GITHUB_FETCH_TIMEOUT_MS,
-    );
-    if (!response.ok) {
-        throw new Error(`GitHub API failed with status ${response.status}`);
-    }
 
-    const payload = await response.json();
+    const octokit = createOctokit(config, GITHUB_FETCH_TIMEOUT_MS);
+    const response = await requestGithubContents(octokit, config, path);
+    const payload = response.data;
     const items = Array.isArray(payload) ? payload : [];
     logInfo?.("github.fetch_tree_walk_response", {
         path,
@@ -259,43 +226,118 @@ function normalizePath(path) {
         .trim();
 }
 
-async function fetchWithTimeout(
-    url,
-    githubToken,
-    resourcePath,
-    timeoutMs = GITHUB_FETCH_TIMEOUT_MS,
-    init = {},
-) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        return await fetch(url, {
-            ...init,
+function createOctokit(config, timeoutMs = GITHUB_FETCH_TIMEOUT_MS) {
+    return new Octokit({
+        auth: config.githubToken,
+        userAgent: GITHUB_USER_AGENT,
+        request: {
+            fetch: createFetchWithTimeout(timeoutMs),
             headers: {
-                Accept: "application/vnd.github+json",
-                Authorization: `Bearer ${githubToken}`,
-                "User-Agent": "llmwikiworker",
-                "X-GitHub-Api-Version": "2022-11-28",
-                ...(init.headers || {}),
+                "X-GitHub-Api-Version": GITHUB_API_VERSION,
             },
-            signal: controller.signal,
-        });
-    } catch (error) {
-        if (error?.name === "AbortError") {
-            throw new Error(
-                `GitHub fetch timed out after ${timeoutMs}ms: ${resourcePath}`,
-            );
-        }
-        throw error;
-    } finally {
-        clearTimeout(timer);
-    }
+        },
+    });
 }
 
-async function safeReadResponseText(response) {
-    try {
-        return await response.text();
-    } catch {
-        return "";
+function createFetchWithTimeout(timeoutMs) {
+    return async function timedFetch(url, init = {}) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        const upstreamSignal = init.signal;
+        let cleanup = null;
+
+        if (upstreamSignal) {
+            if (upstreamSignal.aborted) {
+                controller.abort(upstreamSignal.reason);
+            } else {
+                cleanup = () => controller.abort(upstreamSignal.reason);
+                upstreamSignal.addEventListener("abort", cleanup, {
+                    once: true,
+                });
+            }
+        }
+
+        try {
+            return await fetch(url, {
+                ...init,
+                signal: controller.signal,
+            });
+        } finally {
+            clearTimeout(timer);
+            if (cleanup && upstreamSignal) {
+                upstreamSignal.removeEventListener("abort", cleanup);
+            }
+        }
+    };
+}
+
+async function requestGithubContents(octokit, config, path) {
+    if (path) {
+        return octokit.request("GET /repos/{owner}/{repo}/contents/{path}", {
+            owner: config.githubOwner,
+            repo: config.githubRepo,
+            path,
+            ref: config.githubRef,
+        });
     }
+
+    return octokit.request("GET /repos/{owner}/{repo}/contents", {
+        owner: config.githubOwner,
+        repo: config.githubRepo,
+        ref: config.githubRef,
+    });
+}
+
+function mapGithubFetchError(error, resourcePath, timeoutMs) {
+    if (error?.name === "AbortError") {
+        return new Error(
+            `GitHub fetch timed out after ${timeoutMs}ms: ${resourcePath}`,
+        );
+    }
+
+    const status = getGithubStatus(error);
+    if (status === 404) {
+        return new Error(`GitHub file not found: ${resourcePath}`);
+    }
+    if (status === 401 || status === 403) {
+        return new Error("GitHub authentication failed");
+    }
+    if (status) {
+        return new Error(`GitHub API failed with status ${status}`);
+    }
+    return error instanceof Error ? error : new Error(String(error));
+}
+
+function getGithubStatus(error) {
+    const status = Number(error?.status || error?.response?.status);
+    return Number.isFinite(status) ? status : 0;
+}
+
+function extractGithubErrorText(error) {
+    const data = error?.response?.data;
+    if (typeof data === "string") {
+        return data;
+    }
+    if (typeof data?.message === "string" && data.message) {
+        return data.message;
+    }
+    if (error instanceof Error && error.message) {
+        return error.message;
+    }
+    return "";
+}
+
+function decodeGithubContent(content, encoding = "base64") {
+    if (encoding !== "base64") {
+        return String(content || "");
+    }
+    const normalized = String(content || "").replace(/\n/g, "");
+    const bytes = Uint8Array.from(atob(normalized), (char) =>
+        char.charCodeAt(0),
+    );
+    return new TextDecoder().decode(bytes);
+}
+
+function encodeGithubContent(content) {
+    return btoa(unescape(encodeURIComponent(String(content || ""))));
 }

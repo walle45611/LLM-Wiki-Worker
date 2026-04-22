@@ -19,7 +19,7 @@ export function buildQueryAgentTools(options = {}) {
             function: {
                 name: TOOL_GET_FILE_TREE,
                 description:
-                    "List repository files under a base path so you can discover which knowledge-base files to read next.",
+                    "列出指定目錄下的 repository 檔案樹，讓你先確認有哪些知識庫檔案可讀取。當你要找規則檔、summary、concept、wiki/index.md 或 wiki/log.md 時，先用這個工具探索路徑。",
                 parameters: {
                     type: "object",
                     properties: {
@@ -36,7 +36,7 @@ export function buildQueryAgentTools(options = {}) {
         function: {
             name: TOOL_GET_FILE,
             description:
-                "Read a repository text file by path so you can use its content to answer the user.",
+                "依照 path 讀取單一 repository 文字檔內容。回答問題前，若需要查看 wiki/index.md、wiki/log.md、wiki/rules/ 下的規則檔，或某篇 summary / concept 內容，就用這個工具。",
             parameters: {
                 type: "object",
                 properties: {
@@ -52,7 +52,7 @@ export function buildQueryAgentTools(options = {}) {
         function: {
             name: TOOL_UPSERT_FILE,
             description:
-                "Create or update one repository file under wiki/ using the provided content.",
+                "用提供的完整內容建立或覆蓋一個 `wiki/` 底下的檔案。適合整份重寫單一檔案，例如更新 `wiki/index.md`、直接改寫整份 `wiki/log.md`、或建立 / 更新 summary、concept、rules 檔。",
             parameters: {
                 type: "object",
                 properties: {
@@ -70,7 +70,7 @@ export function buildQueryAgentTools(options = {}) {
         function: {
             name: TOOL_APPEND_FILE,
             description:
-                "Append text to the end of one repository file under wiki/, creating it if needed.",
+                "把文字追加到單一 `wiki/` 檔案的最後面，檔案不存在時會自動建立。只適合明確要加在檔尾的情況；如果是 `wiki/log.md` 這種通常要把最新紀錄放最前面，就不要用 append_file，應改用 upsert_file 或 replace_in_file。",
             parameters: {
                 type: "object",
                 properties: {
@@ -88,7 +88,7 @@ export function buildQueryAgentTools(options = {}) {
         function: {
             name: TOOL_REPLACE_IN_FILE,
             description:
-                "Replace one exact text fragment inside one repository file under wiki/.",
+                "在單一 `wiki/` 檔案中，把一段完全相同的文字替換成新文字。適合小範圍精準修改，例如在 `wiki/log.md` 最上方插入一筆新紀錄、更新 `wiki/index.md` 某個區塊，或修正既有 summary / concept 的特定段落。",
             parameters: {
                 type: "object",
                 properties: {
@@ -194,7 +194,9 @@ async function getFileTreeTool(args, { config, trace, logInfo }) {
             max_depth: maxDepth,
         },
     });
-    const tree = await fetchGithubFileTree(config, basePath, maxDepth, { logInfo });
+    const tree = await fetchGithubFileTree(config, basePath, maxDepth, {
+        logInfo,
+    });
 
     logInfo("tool.get_file_tree_completed", {
         requestId: trace.requestId,
@@ -350,7 +352,9 @@ async function replaceInFileTool(args, { config, trace, logInfo }) {
     }
     const existingContent = await fetchGithubFile(config, path, { logInfo });
     if (!existingContent.includes(find)) {
-        throw new Error(`replace_in_file could not find target text in ${path}`);
+        throw new Error(
+            `replace_in_file could not find target text in ${path}`,
+        );
     }
     const nextContent = replaceFirst(existingContent, find, replace);
     const payload = await upsertGithubFile(config, path, nextContent, {

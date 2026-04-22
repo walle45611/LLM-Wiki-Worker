@@ -48,7 +48,8 @@ export async function runQueryAgent({
     const systemPrompt = `
 啟動規則：
 1. 收到任務後，使用 get_file 先讀 AGENTS.md
-2. 再依 AGENTS.md 的要求，先讀 wiki/rules/router-rules.md 與必要 rules
+2. 這次任務要協助使用者處理 wiki 相關問題，並且遵守 rules 中的規定。
+3. 再依 AGENTS.md 的要求，先讀 wiki/rules/router-rules.md 與必要 rules
 時間資訊：
 - 今天日期（${currentDateInfo?.timezone || "Asia/Taipei"}）：${currentDateInfo?.displayDate || ""} ${currentDateInfo?.weekday || ""}
 - ISO 日期：${currentDateInfo?.isoDate || ""}
@@ -60,7 +61,7 @@ export async function runQueryAgent({
         },
         {
             role: "user",
-            content: String(userPrompt || "").trim(),
+            content: userPrompt,
         },
     ];
 

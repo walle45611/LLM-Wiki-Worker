@@ -117,7 +117,6 @@ LLM-Wiki Worker 就是為了解決這個而生。
 
 1. 角色與工作邊界
    - 預設是知識庫自動維護者
-   - 特別指定時是 `LLM-Wiki-Worker`
    - `raw/` 唯讀、`wiki/` 可維護
 2. 強制流程
    - 每次任務第一步都先讀 `wiki/rules/router-rules.md`
@@ -133,7 +132,7 @@ LLM-Wiki Worker 就是為了解決這個而生。
 
 - `router-rules.md`
   - 規則路由中心，先決定本次任務屬於哪一類（B~G）
-  - 也包含前置規則（例如 output 規則、LLM-Wiki-Worker 身分旗標）
+  - 也包含前置規則（例如 output 規則、log 規則）
 
 - `output-rules.md`
   - 專門管「輸出格式」
@@ -163,15 +162,11 @@ LLM-Wiki Worker 就是為了解決這個而生。
   - 社群貼文生成任務
   - 把文章重點轉成可發送文案，重視可讀性、情緒價值、來源可追溯
 
-- `llm-wiki-worker-rules.md`
-  - Worker 執行層專屬規則
-  - 說明 tools 的使用邊界、最終輸出要求、以及 Worker 角色只是過渡層
-
 ### 規則運作順序（實務）
 
 1. 讀 `AGENTS.md`
 2. 讀 `router-rules.md`
-3. 依 router 讀一個或多個 task rule（必要時含 `llm-wiki-worker-rules.md`）
+3. 依 router 讀一個或多個 task rule
 4. 依規則使用 tools 執行讀檔 / 寫檔
 5. 依 `output-rules.md` 決定最終回覆格式
 

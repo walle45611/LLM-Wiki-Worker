@@ -4,12 +4,14 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "set": "wrangler secret bulk -c wrangler.jsonc",
-        "test": "node --test",
+        "set": "wrangler secret bulk .dev.vars",
+        "test": "node --test --test-concurrency=1",
         "deploy": "wrangler deploy"
     },
     "dependencies": {
-        "hono": "^4.8.3"
+        "grammy": "^1.42.0",
+        "hono": "^4.8.3",
+        "octokit": "^5.0.5"
     },
     "devDependencies": {
         "@cloudflare/workers-types": "^4.20260317.1",

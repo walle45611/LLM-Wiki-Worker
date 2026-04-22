@@ -5,36 +5,30 @@ export function extractAiText(result) {
     if (typeof result === "string") {
         return result;
     }
-    if (typeof result.response === "string") {
-        return result.response;
-    }
-    if (Array.isArray(result.response)) {
-        return result.response
-            .map((item) =>
-                typeof item === "string"
-                    ? item
-                    : item?.text || item?.content || "",
-            )
-            .filter(Boolean)
-            .join("\n");
-    }
-    if (typeof result.output_text === "string") {
-        return result.output_text;
-    }
 
-    const outputText = extractOutputText(result.output);
-    if (outputText) {
-        return outputText;
-    }
+    const candidates = [
+        typeof result.response === "string" ? result.response : "",
+        Array.isArray(result.response)
+            ? joinTextParts(
+                  result.response.map((item) =>
+                      typeof item === "string"
+                          ? item
+                          : item?.text || item?.content || "",
+                  ),
+              )
+            : "",
+        typeof result.output_text === "string" ? result.output_text : "",
+        extractOutputText(result.output),
+        Array.isArray(result.choices)
+            ? joinTextParts(
+                  result.choices.map(
+                      (choice) => choice?.message?.content || choice?.text || "",
+                  ),
+              )
+            : "",
+    ];
 
-    if (Array.isArray(result.choices)) {
-        return result.choices
-            .map((choice) => choice?.message?.content || choice?.text || "")
-            .filter(Boolean)
-            .join("\n");
-    }
-
-    return "";
+    return candidates.find(Boolean) || "";
 }
 
 export function extractSummaryReplyFromResult(result) {
@@ -115,22 +109,29 @@ function extractOutputText(output) {
 
     const chunks = [];
     for (const item of output) {
-        if (typeof item?.text === "string") {
-            chunks.push(item.text);
+        chunks.push(
+            typeof item?.text === "string" ? item.text : "",
+            typeof item?.content === "string" ? item.content : "",
+        );
+
+        if (!Array.isArray(item?.content)) {
+            continue;
         }
-        if (typeof item?.content === "string") {
-            chunks.push(item.content);
-        }
-        if (Array.isArray(item?.content)) {
-            for (const part of item.content) {
-                if (typeof part === "string") {
-                    chunks.push(part);
-                } else if (typeof part?.text === "string") {
-                    chunks.push(part.text);
-                }
-            }
+
+        for (const part of item.content) {
+            chunks.push(
+                typeof part === "string"
+                    ? part
+                    : typeof part?.text === "string"
+                      ? part.text
+                      : "",
+            );
         }
     }
 
-    return chunks.filter(Boolean).join("\n");
+    return joinTextParts(chunks);
+}
+
+function joinTextParts(parts) {
+    return parts.filter(Boolean).join("\n");
 }
