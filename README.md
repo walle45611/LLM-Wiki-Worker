@@ -18,15 +18,15 @@ Worker 端的 Query Agent 會先讀 `AGENTS.md` / router rules，再用 tools（
 
 4️⃣ Cloudflare Worker and Worker AI (Serverless)
 
-LINE webhook 進 Cloudflare Worker 後，事件先進 `LLM_WIKI_QUEUE`，由 queue consumer 背景執行 AI 流程（避免 request 生命週期限制）；排程也走同一條 queue，統一處理模型推理與資料更新。
+Telegram webhook 進 Cloudflare Worker 後，事件先進 `LLM_WIKI_QUEUE`，由 queue consumer 背景執行 AI 流程（避免 request 生命週期限制）；排程也走同一條 queue，統一處理模型推理與資料更新。
 
 5️⃣ 分類隔離 (Output)
 
 知識庫與互動輸出分層管理：`raw/` 唯讀、`wiki/` 可維護；最終可回覆的內容由 Worker 產生，並可透過寫檔 tools 直接更新 `wiki/` 下檔案，避免手工筆記與 AI 整理互相干擾。
 
-6️⃣ LINE 互動 (Query & Reply)
+6️⃣ Telegram 互動 (Query & Reply)
 
-你在 LINE 提問（如「今天讀了什麼」）後，Worker 會從 queue 取任務、讀取 GitHub 知識庫、整理回覆再 push 回 LINE；而且在送出前會做 Markdown 清理（regex）與長度控制，確保訊息適合手機閱讀。
+你在 Telegram 提問（如「今天讀了什麼」）後，Worker 會從 queue 取任務、讀取 GitHub 知識庫、整理回覆再回傳到 Telegram；訊息送出前會做長度控制，避免超出聊天平台限制。
 
 ## 專案初衷
 
@@ -39,26 +39,26 @@ LLM-Wiki Worker 就是為了解決這個而生。
 
 它想做的不只是「幫你保存資料」，而是把那些沉在筆記深處、快被遺忘的網頁與影片內容，轉成可以被查詢、被串接、被持續更新的活資料。當你再次想起某個模糊線索時，它能幫你把記憶拉回來，整理成你現在就能用的答案。
 
-這個專案會把 LINE webhook 指向 Cloudflare Worker，並透過 Queue 在背景執行 AI 查詢與知識庫整理。
+這個專案會把 Telegram webhook 指向 Cloudflare Worker，並透過 Queue 在背景執行 AI 查詢與知識庫整理。
 
 目前流程支援：
 
-- 一般 LINE 文字查詢（enqueue 後由 queue consumer 處理）
+- 一般 Telegram 文字查詢（enqueue 後由 queue consumer 處理）
 - 每日排程摘要（enqueue `scheduled_summary` 後由 queue consumer 處理）
 - AI 透過 GitHub 私有 repo 讀寫知識庫檔案（`wiki/`）
 
 ## Architecture
 
-1. LINE 把事件送到 `POST /webhook`
-2. Worker 驗簽成功後，把任務送進 `LLM_WIKI_QUEUE`
-3. queue consumer 讀取 job，執行 `buildLineQueryReply()`
+1. Telegram 把事件送到 `POST /webhook`
+2. Worker 解析 webhook payload 後，把任務送進 `LLM_WIKI_QUEUE`
+3. queue consumer 讀取 job，執行 query agent
 4. query agent 透過 tools 讀規則 / 讀檔 / 寫檔
-5. 最終訊息送 LINE push
+5. 最終訊息送 Telegram Bot API
 
 ## 專案第一層目錄用途
 
 - `src/`
-  - Worker 主程式與核心邏輯（webhook、queue、排程、AI 流程、LINE client、GitHub client、rules 執行）
+  - Worker 主程式與核心邏輯（webhook、queue、排程、AI 流程、Telegram client、GitHub client、rules 執行）
 
 - `test/`
   - Node test runner 測試檔，覆蓋主要流程與工具行為
@@ -76,8 +76,8 @@ LLM-Wiki Worker 就是為了解決這個而生。
 
 ## Queue Jobs
 
-- `line_text_query`
-  - 來源：LINE webhook
+- `telegram_text_query`
+  - 來源：Telegram webhook
   - 內容：使用者文字查詢
 
 - `scheduled_summary`
@@ -170,12 +170,11 @@ LLM-Wiki Worker 就是為了解決這個而生。
 4. 依規則使用 tools 執行讀檔 / 寫檔
 5. 依 `output-rules.md` 決定最終回覆格式
 
-## LINE Output Safety
+## Telegram Output Safety
 
-送給 LINE 前會做兩道保護：
+送給 Telegram 前會做長度保護：
 
-1. `stripMarkdown`：用 regex 清理常見 Markdown（標題、粗體、連結、清單、code fence 等）
-2. `clampLineText`：超過 4500 字會截斷並補上 `[內容已截斷]`
+1. `clampChatText`：超過 3500 字會截斷並補上 `[內容已截斷]`
 
 ## Runtime Config
 
@@ -185,8 +184,7 @@ LLM-Wiki Worker 就是為了解決這個而生。
 
 ## Required Cloudflare Secrets
 
-- `LINE_CHANNEL_ACCESS_TOKEN`
-- `LINE_CHANNEL_SECRET`
+- `TELEGRAM_BOT_TOKEN`
 - `GITHUB_TOKEN`
 
 ## Required Cloudflare Variables
@@ -195,7 +193,7 @@ LLM-Wiki Worker 就是為了解決這個而生。
 - `GITHUB_REPO`
 - `GITHUB_REF`（預設 `main`）
 - `APP_TIMEZONE`（預設 `Asia/Taipei`）
-- `LINE_TARGET_USER_ID`（排程推播目標）
+- `TELEGRAM_TARGET_CHAT_ID`（排程推播目標）
 - `AI_MODEL`（預設 `@cf/openai/gpt-oss-20b`）
 
 ## Wrangler Config Highlights
@@ -218,8 +216,7 @@ bunx wrangler queues create llm-wiki-queue
 bunx wrangler queues list
 
 # 4) 設定必要 secrets
-bunx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN
-bunx wrangler secret put LINE_CHANNEL_SECRET
+bunx wrangler secret put TELEGRAM_BOT_TOKEN
 bunx wrangler secret put GITHUB_TOKEN
 
 # 5) 部署 Worker（會套用 wrangler.jsonc 的 queue producer/consumer 綁定）
@@ -232,7 +229,7 @@ bun run deploy
 - `GITHUB_REPO`
 - `GITHUB_REF`
 - `APP_TIMEZONE`
-- `LINE_TARGET_USER_ID`
+- `TELEGRAM_TARGET_CHAT_ID`
 - `AI_MODEL`
 
 初始化後可用以下方式快速驗證：
