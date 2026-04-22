@@ -7,16 +7,25 @@ import {
     getToolCallName,
     parseToolCallArguments,
 } from "../ai/tools.js";
-import { extractAiText, extractSummaryReplyFromResult } from "../ai/response.js";
+import {
+    extractAiText,
+    extractSummaryReplyFromResult,
+} from "../ai/response.js";
+import {
+    buildDateInfoFromIsoDate,
+    detectReadingLookupDateFromText,
+} from "../date.js";
+import {
+    getCompletionRejectionReason,
+    rememberSuccessfulFileRead,
+} from "./query-agent-guard.js";
 import { logInfo, logWarn, toJsonPreview, toPreview } from "../logger.js";
 
-const DEFAULT_MAX_TOKENS = 6144;
-const QUERY_AGENT_TIMEOUT_REPLY =
-    "目前整理流程逾時，請稍後再試。";
+const DEFAULT_MAX_TOKENS = 4096;
+const QUERY_AGENT_TIMEOUT_REPLY = "目前整理流程逾時，請稍後再試。";
 
 export async function runQueryAgent({
     userPrompt,
-    agentPrompt,
     aiBinding,
     aiModel,
     config,
@@ -26,17 +35,20 @@ export async function runQueryAgent({
 }) {
     assertAiBindingConfigured(aiBinding);
     const tools = buildQueryAgentTools({ enableFileTree: true });
-    const agentInstructions = String(agentPrompt || "").trim();
+    const singleDateReviewIsoDate = detectReadingLookupDateFromText(
+        userPrompt,
+        currentDateInfo,
+    );
+    const singleDateReviewInfo = singleDateReviewIsoDate
+        ? buildDateInfoFromIsoDate(
+              singleDateReviewIsoDate,
+              currentDateInfo?.timezone || "Asia/Taipei",
+          )
+        : null;
     const systemPrompt = `
 啟動規則：
-1. 收到任務後，先讀 AGENTS.md
+1. 收到任務後，使用 get_file 先讀 AGENTS.md
 2. 再依 AGENTS.md 的要求，先讀 wiki/rules/router-rules.md 與必要 rules
-3. 未讀完必要規則前，不得直接回答，不得直接寫入
-
-工作限制：
-- raw/ 絕對唯讀
-- 只能根據實際讀到的內容工作
-
 時間資訊：
 - 今天日期（${currentDateInfo?.timezone || "Asia/Taipei"}）：${currentDateInfo?.displayDate || ""} ${currentDateInfo?.weekday || ""}
 - ISO 日期：${currentDateInfo?.isoDate || ""}
@@ -61,7 +73,9 @@ export async function runQueryAgent({
     const startedAt = Date.now();
     const deadlineMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 60000;
     let conversation = [...messages];
-    const maxRounds = 100;
+    const successfulFileReads = new Map();
+    const toolFailures = [];
+    const maxRounds = 50;
     logInfo("ai.query_agent_started", {
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
@@ -84,7 +98,6 @@ export async function runQueryAgent({
             eventIndex: trace.eventIndex,
             round: round + 1,
             model: aiModel,
-            instructionPreview: String(agentInstructions || ""),
             promptLength: systemPrompt.length,
             promptPreview: String(systemPrompt || ""),
             remainingMs,
@@ -108,7 +121,8 @@ export async function runQueryAgent({
                 eventIndex: trace.eventIndex,
                 round: round + 1,
                 errorName: error instanceof Error ? error.name : typeof error,
-                errorMessage: error instanceof Error ? error.message : String(error),
+                errorMessage:
+                    error instanceof Error ? error.message : String(error),
                 remainingMs,
                 elapsedMs: Date.now() - startedAt,
             });
@@ -159,6 +173,33 @@ export async function runQueryAgent({
                     elapsedMs: Date.now() - startedAt,
                 });
                 return "目前有找到資料，但暫時無法整理成可讀回覆，請稍後再試。";
+            }
+            const rejectionReason = getCompletionRejectionReason({
+                reply,
+                singleDateReviewInfo,
+                successfulFileReads,
+                toolFailures,
+            });
+            if (rejectionReason) {
+                conversation = [
+                    ...conversation,
+                    {
+                        role: "assistant",
+                        content: reply,
+                    },
+                    {
+                        role: "user",
+                        content: rejectionReason,
+                    },
+                ];
+                logWarn("ai.query_agent_completion_rejected", {
+                    requestId: trace.requestId,
+                    eventIndex: trace.eventIndex,
+                    round: round + 1,
+                    reasonPreview: toPreview(rejectionReason),
+                    elapsedMs: Date.now() - startedAt,
+                });
+                continue;
             }
             logInfo("ai.query_agent_completed", {
                 requestId: trace.requestId,
@@ -214,16 +255,25 @@ export async function runQueryAgent({
                     round: round + 1,
                     name,
                     argsPreview: toJsonPreview(args),
-                    errorMessage: error instanceof Error ? error.message : String(error),
+                    errorMessage:
+                        error instanceof Error ? error.message : String(error),
                 });
                 if (isTimeoutLikeError(error)) {
                     return QUERY_AGENT_TIMEOUT_REPLY;
                 }
                 toolResult = {
-                    error: error instanceof Error ? error.message : String(error),
+                    error:
+                        error instanceof Error ? error.message : String(error),
                     guidance:
                         "If the path may be missing .md or the filename may differ, try get_file again with .md or inspect the nearest parent directory with get_file_tree instead of scanning root.",
                 };
+                toolFailures.push({
+                    round: round + 1,
+                    name,
+                    args,
+                    error:
+                        error instanceof Error ? error.message : String(error),
+                });
             }
             logInfo("ai.query_agent_tool_call_completed", {
                 requestId: trace.requestId,
@@ -232,6 +282,13 @@ export async function runQueryAgent({
                 name,
                 resultPreview: toJsonPreview(toolResult),
             });
+            if (
+                name === "get_file" &&
+                toolResult &&
+                typeof toolResult === "object"
+            ) {
+                rememberSuccessfulFileRead(successfulFileReads, toolResult);
+            }
             toolMessages.push({
                 role: "tool",
                 tool_call_id: id,

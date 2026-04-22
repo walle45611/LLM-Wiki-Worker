@@ -1,6 +1,11 @@
 import { Hono } from "hono";
 import { extractAiText, extractSummaryReplyFromResult } from "./ai/response.js";
 import {
+    buildDateInfoFromIsoDate,
+    detectReadingLookupDateFromText,
+    getCurrentDateInfo,
+} from "./date.js";
+import {
     buildScheduledQuery,
     getRuntimeConfig,
     getScheduledDate,
@@ -18,14 +23,11 @@ import {
     resolveSummaryPathsForDate,
 } from "./knowledge.js";
 import { logError, logInfo, logWarn, toPreview } from "./logger.js";
-import { buildLineQueryReply } from "./flows/query-flow.js";
+import { runQueryAgent } from "./flows/query-agent.js";
 import {
-    buildDateInfoFromIsoDate,
-    detectReadingLookupDateFromText,
-    getCurrentDateInfo,
     timingSafeEqual,
     verifyLineSignature,
-} from "./flows/date-query.js";
+} from "./line/signature.js";
 import { pushToLineUser, replyToLine } from "./line/client.js";
 import { buildUserErrorMessage, clampLineText } from "./line/messages.js";
 
@@ -43,6 +45,7 @@ export {
     parseSummaryIndex,
     parseSummaryIndexEntries,
     resolveSummaryPathsForDate,
+    runQueryAgent,
     timingSafeEqual,
     verifyLineSignature,
 };
@@ -250,18 +253,43 @@ export async function handleLineQueryQueue(batch, env) {
                 throw new Error("Invalid queue payload: missing text or sourceUserId");
             }
 
-            const reply = await buildLineQueryReply({
-                text,
-                env,
-                config,
-                currentDateInfo,
-                trace,
-                eventPrefix:
-                    job.type === "scheduled_summary"
-                        ? "scheduled_queue"
-                        : "line_queue",
-                totalStartedAt: startedAt,
+            const eventPrefix =
+                job.type === "scheduled_summary"
+                    ? "scheduled_queue"
+                    : "line_queue";
+            logInfo(`${eventPrefix}.user_query`, {
+                requestId: trace.requestId,
+                eventIndex: trace.eventIndex,
+                textPreview: toPreview(text),
+                currentDate: currentDateInfo.isoDate,
+            });
+            logInfo(`${eventPrefix}.agent_timeout_selected`, {
+                requestId: trace.requestId,
+                eventIndex: trace.eventIndex,
                 timeoutMs: config.eventTimeoutMs,
+            });
+            const userPrompt =
+                eventPrefix === "scheduled_queue"
+                    ? text
+                    : `你是 LLM-Wiki-Worker，${text}`;
+            const rawReply = await runQueryAgent({
+                userPrompt,
+                aiBinding: env.AI,
+                aiModel: config.aiModel,
+                config,
+                trace,
+                timeoutMs: config.eventTimeoutMs,
+                currentDateInfo,
+            });
+            const reply = clampLineText(rawReply);
+            logInfo(`${eventPrefix}.summary_generated`, {
+                requestId: trace.requestId,
+                eventIndex: trace.eventIndex,
+                summaryLength: rawReply.length,
+                summaryPreview: toPreview(rawReply),
+                replyLength: reply.length,
+                totalElapsedMs: Date.now() - startedAt,
+                currentDate: currentDateInfo.isoDate,
             });
 
             await pushToLineUser(userId, reply, env.LINE_CHANNEL_ACCESS_TOKEN);

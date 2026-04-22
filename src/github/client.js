@@ -30,7 +30,8 @@ export async function fetchGithubFile(config, filePath, options = {}) {
         logInfo?.("github.fetch_failed", {
             path: filePath,
             elapsedMs: Date.now() - startedAt,
-            errorMessage: error instanceof Error ? error.message : String(error),
+            errorMessage:
+                error instanceof Error ? error.message : String(error),
         });
         throw error;
     }
@@ -67,7 +68,12 @@ export async function fetchGithubFile(config, filePath, options = {}) {
     return decoded;
 }
 
-export async function upsertGithubFile(config, filePath, content, options = {}) {
+export async function upsertGithubFile(
+    config,
+    filePath,
+    content,
+    options = {},
+) {
     const { logInfo, commitMessage } = options;
     const encodedPath = filePath
         .split("/")
@@ -92,7 +98,8 @@ export async function upsertGithubFile(config, filePath, content, options = {}) 
     } catch (error) {
         logInfo?.("github.upsert_lookup_failed", {
             path: filePath,
-            errorMessage: error instanceof Error ? error.message : String(error),
+            errorMessage:
+                error instanceof Error ? error.message : String(error),
         });
     }
 
@@ -134,7 +141,12 @@ export async function upsertGithubFile(config, filePath, content, options = {}) 
     return payload;
 }
 
-export async function fetchGithubFileTree(config, basePath, maxDepth, options = {}) {
+export async function fetchGithubFileTree(
+    config,
+    basePath,
+    maxDepth,
+    options = {},
+) {
     const { logInfo } = options;
     const entries = [];
     const startedAt = Date.now();
@@ -168,7 +180,8 @@ export async function fetchGithubFileTree(config, basePath, maxDepth, options = 
             basePath: safeBasePath,
             maxDepth: safeMaxDepth,
             elapsedMs: Date.now() - startedAt,
-            errorMessage: error instanceof Error ? error.message : String(error),
+            errorMessage:
+                error instanceof Error ? error.message : String(error),
         });
         throw error;
     }
@@ -185,10 +198,14 @@ async function walkGithubDir(
     startedAt,
 ) {
     if (Date.now() - startedAt > GITHUB_TREE_TOTAL_TIMEOUT_MS) {
-        throw new Error(`GitHub tree walk timed out after ${GITHUB_TREE_TOTAL_TIMEOUT_MS}ms`);
+        throw new Error(
+            `GitHub tree walk timed out after ${GITHUB_TREE_TOTAL_TIMEOUT_MS}ms`,
+        );
     }
     if (output.length >= GITHUB_TREE_MAX_ENTRIES) {
-        throw new Error(`GitHub tree walk exceeded ${GITHUB_TREE_MAX_ENTRIES} entries`);
+        throw new Error(
+            `GitHub tree walk exceeded ${GITHUB_TREE_MAX_ENTRIES} entries`,
+        );
     }
     logInfo?.("github.fetch_tree_walk_started", {
         path,
