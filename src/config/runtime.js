@@ -1,6 +1,8 @@
 export const AGENTS_PATH = "AGENTS.md";
 export const DEFAULT_AI_MODEL = "@cf/openai/gpt-oss-20b";
 export const EVENT_TIMEOUT_MS = 120000;
+export const TELEGRAM_WEBHOOK_SECRET_HEADER =
+    "x-telegram-bot-api-secret-token";
 
 export function buildScheduledQuery(_currentDateInfo) {
     return "排程任務需要把當天整理結果寫入知識庫";
@@ -38,6 +40,15 @@ export function requireTelegramChatId(config) {
         throw new Error("Missing required environment variable: TELEGRAM_CHAT_ID");
     }
     return config.telegramChatId;
+}
+
+export function requireTelegramWebhookSecret(env) {
+    if (!env?.TELEGRAM_WEBHOOK_SECRET) {
+        throw new Error(
+            "Missing required environment variable: TELEGRAM_WEBHOOK_SECRET",
+        );
+    }
+    return String(env.TELEGRAM_WEBHOOK_SECRET);
 }
 
 export function getScheduledDate(controller) {

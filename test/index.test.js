@@ -19,7 +19,11 @@ import {
     resolveSummaryPathsForDate,
     runQueryAgent,
 } from "../src/index.js";
-import { getRuntimeConfig } from "../src/config/runtime.js";
+import {
+    getRuntimeConfig,
+    requireTelegramWebhookSecret,
+    TELEGRAM_WEBHOOK_SECRET_HEADER,
+} from "../src/config/runtime.js";
 import { fetchGithubFile } from "../src/github/client.js";
 import {
     buildQueryAgentTools,
@@ -77,6 +81,56 @@ test("GET / returns worker status", async () => {
 
     assert.equal(response.status, 200);
     assert.deepEqual(payload, { ok: true, service: "llmwikiworker" });
+});
+
+test("POST /webhook rejects requests without telegram secret header", async () => {
+    const response = await app.request(
+        "http://localhost/webhook",
+        {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ update_id: 1 }),
+        },
+        {
+            TELEGRAM_BOT_TOKEN: "telegram-token",
+            TELEGRAM_WEBHOOK_SECRET: "expected-secret",
+            LLM_WIKI_QUEUE: { async send() {} },
+        },
+    );
+
+    assert.equal(response.status, 401);
+    assert.equal(await response.text(), "Unauthorized");
+});
+
+test("POST /webhook rejects requests with wrong telegram secret header", async () => {
+    const response = await app.request(
+        "http://localhost/webhook",
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                [TELEGRAM_WEBHOOK_SECRET_HEADER]: "wrong-secret",
+            },
+            body: JSON.stringify({ update_id: 1 }),
+        },
+        {
+            TELEGRAM_BOT_TOKEN: "telegram-token",
+            TELEGRAM_WEBHOOK_SECRET: "expected-secret",
+            LLM_WIKI_QUEUE: { async send() {} },
+        },
+    );
+
+    assert.equal(response.status, 401);
+    assert.equal(await response.text(), "Unauthorized");
+});
+
+test("requireTelegramWebhookSecret returns configured secret", () => {
+    assert.equal(
+        requireTelegramWebhookSecret({
+            TELEGRAM_WEBHOOK_SECRET: "expected-secret",
+        }),
+        "expected-secret",
+    );
 });
 
 test("extractLogForDate returns dated section until next heading", () => {

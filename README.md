@@ -185,6 +185,7 @@ LLM-Wiki Worker 就是為了解決這個而生。
 ## Required Cloudflare Secrets
 
 - `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_WEBHOOK_SECRET`
 - `TELEGRAM_CHAT_ID`
 - `GITHUB_TOKEN`
 
@@ -217,12 +218,23 @@ bunx wrangler queues list
 
 # 4) 設定必要 secrets
 bunx wrangler secret put TELEGRAM_BOT_TOKEN
+bunx wrangler secret put TELEGRAM_WEBHOOK_SECRET
 bunx wrangler secret put TELEGRAM_CHAT_ID
 bunx wrangler secret put GITHUB_TOKEN
 
 # 5) 部署 Worker（會套用 wrangler.jsonc 的 queue producer/consumer 綁定）
 bun run deploy
 ```
+
+部署完成後，請把 Telegram webhook 設到 Worker，並帶上同一組 secret token：
+
+```bash
+curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
+  -d "url=https://<your-worker-domain>/webhook" \
+  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+```
+
+Worker 會驗證 request header `X-Telegram-Bot-Api-Secret-Token` 是否等於 `TELEGRAM_WEBHOOK_SECRET`；不符就直接回 `401 Unauthorized`。
 
 若你要在 Cloudflare Dashboard 直接維護變數，請確認以下 vars 與 `wrangler.jsonc` 一致：
 

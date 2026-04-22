@@ -11,6 +11,8 @@ import {
     getScheduledDate,
     maskChatId,
     requireTelegramChatId,
+    requireTelegramWebhookSecret,
+    TELEGRAM_WEBHOOK_SECRET_HEADER,
 } from "./config/runtime.js";
 import { fetchGithubFile } from "./github/client.js";
 import {
@@ -60,10 +62,27 @@ app.post("/webhook", async (c) => {
     const requestId = crypto.randomUUID();
     const startedAt = Date.now();
     const bodyText = await c.req.text();
+    const receivedSecret = c.req.header(TELEGRAM_WEBHOOK_SECRET_HEADER) || "";
     logInfo("webhook.received", {
         requestId,
         bodyLength: bodyText.length,
     });
+
+    let expectedSecret = "";
+    try {
+        expectedSecret = requireTelegramWebhookSecret(c.env);
+    } catch (error) {
+        logError("webhook.misconfigured_secret", { requestId }, error);
+        return c.text("Internal Server Error", 500);
+    }
+
+    if (receivedSecret !== expectedSecret) {
+        logWarn("webhook.secret_verification_failed", {
+            requestId,
+            hasReceivedSecret: Boolean(receivedSecret),
+        });
+        return c.text("Unauthorized", 401);
+    }
 
     let payload = null;
     try {
