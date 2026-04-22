@@ -185,6 +185,7 @@ LLM-Wiki Worker 就是為了解決這個而生。
 ## Required Cloudflare Secrets
 
 - `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
 - `GITHUB_TOKEN`
 
 ## Required Cloudflare Variables
@@ -193,7 +194,6 @@ LLM-Wiki Worker 就是為了解決這個而生。
 - `GITHUB_REPO`
 - `GITHUB_REF`（預設 `main`）
 - `APP_TIMEZONE`（預設 `Asia/Taipei`）
-- `TELEGRAM_CHAT_ID`（排程推播目標）
 - `AI_MODEL`（預設 `@cf/openai/gpt-oss-20b`）
 
 ## Wrangler Config Highlights
@@ -217,6 +217,7 @@ bunx wrangler queues list
 
 # 4) 設定必要 secrets
 bunx wrangler secret put TELEGRAM_BOT_TOKEN
+bunx wrangler secret put TELEGRAM_CHAT_ID
 bunx wrangler secret put GITHUB_TOKEN
 
 # 5) 部署 Worker（會套用 wrangler.jsonc 的 queue producer/consumer 綁定）
@@ -229,7 +230,6 @@ bun run deploy
 - `GITHUB_REPO`
 - `GITHUB_REF`
 - `APP_TIMEZONE`
-- `TELEGRAM_CHAT_ID`
 - `AI_MODEL`
 
 初始化後可用以下方式快速驗證：
