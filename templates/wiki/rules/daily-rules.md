@@ -83,7 +83,8 @@
 
 1. 必須同步更新 `wiki/log.md`。
 2. log 必須記錄這次 daily 任務已執行，並指出更新的 daily 檔案路徑與依據來源。
-3. 若 daily 檔未成功寫入，禁止先聲稱 log 已完成。
+3. 新 log 必須附加在 `wiki/log.md` 檔案尾端，不可插入中間或改寫舊紀錄。
+4. 若 daily 檔未成功寫入，禁止先聲稱 log 已完成。
 
 建議 daily log 格式：
 

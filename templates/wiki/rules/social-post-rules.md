@@ -113,6 +113,7 @@
 ## Log 規則
 
 若本次任務同時有更新知識庫檔案，則應同步更新 `wiki/log.md`。
+新 log 必須附加在 `wiki/log.md` 檔案尾端，不可插入中間或改寫舊紀錄。
 
 建議 social post log 格式：
 
