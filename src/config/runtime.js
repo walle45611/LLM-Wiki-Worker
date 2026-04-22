@@ -27,19 +27,17 @@ export function getRuntimeConfig(env) {
         githubToken: env.GITHUB_TOKEN,
         timezone: env.APP_TIMEZONE || "Asia/Taipei",
         telegramBotToken: env.TELEGRAM_BOT_TOKEN,
-        telegramTargetChatId: env.TELEGRAM_TARGET_CHAT_ID || "",
+        telegramChatId: env.TELEGRAM_CHAT_ID || "",
         aiModel: env.AI_MODEL || DEFAULT_AI_MODEL,
         eventTimeoutMs: EVENT_TIMEOUT_MS,
     };
 }
 
-export function requireTelegramTargetChatId(config) {
-    if (!config.telegramTargetChatId) {
-        throw new Error(
-            "Missing required environment variable: TELEGRAM_TARGET_CHAT_ID",
-        );
+export function requireTelegramChatId(config) {
+    if (!config.telegramChatId) {
+        throw new Error("Missing required environment variable: TELEGRAM_CHAT_ID");
     }
-    return config.telegramTargetChatId;
+    return config.telegramChatId;
 }
 
 export function getScheduledDate(controller) {

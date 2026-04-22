@@ -522,7 +522,7 @@ test("handleScheduledSummary enqueues scheduled summary job", async () => {
     const queuedJobs = [];
     const env = {
         TELEGRAM_BOT_TOKEN: "telegram-token",
-        TELEGRAM_TARGET_CHAT_ID: "123456789",
+        TELEGRAM_CHAT_ID: "123456789",
         GITHUB_OWNER: "walle4561",
         GITHUB_REPO: "LLM-Wiki",
         GITHUB_TOKEN: "github-token",
@@ -552,7 +552,7 @@ test("handleScheduledSummary enqueues scheduled summary job", async () => {
 test("handleScheduledSummary throws when queue enqueue fails", async () => {
     const env = {
         TELEGRAM_BOT_TOKEN: "telegram-token",
-        TELEGRAM_TARGET_CHAT_ID: "123456789",
+        TELEGRAM_CHAT_ID: "123456789",
         GITHUB_OWNER: "walle4561",
         GITHUB_REPO: "LLM-Wiki",
         GITHUB_TOKEN: "github-token",
@@ -577,7 +577,7 @@ test("handleScheduledSummary throws when queue enqueue fails", async () => {
     );
 });
 
-test("handleScheduledSummary requires TELEGRAM_TARGET_CHAT_ID", async () => {
+test("handleScheduledSummary requires TELEGRAM_CHAT_ID", async () => {
     const env = {
         TELEGRAM_BOT_TOKEN: "telegram-token",
         GITHUB_OWNER: "walle4561",
@@ -598,7 +598,7 @@ test("handleScheduledSummary requires TELEGRAM_TARGET_CHAT_ID", async () => {
             },
             env,
         ),
-        /TELEGRAM_TARGET_CHAT_ID/,
+        /TELEGRAM_CHAT_ID/,
     );
 });
 

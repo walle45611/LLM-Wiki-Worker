@@ -42,7 +42,7 @@
     },
     "vars": {
         "APP_TIMEZONE": "Asia/Taipei",
-        "TELEGRAM_TARGET_CHAT_ID": "",
+        "TELEGRAM_CHAT_ID": "",
         "GITHUB_OWNER": "walle4561",
         "GITHUB_REPO": "LLM-Wiki",
         "GITHUB_REF": "main",

@@ -10,7 +10,7 @@ import {
     getRuntimeConfig,
     getScheduledDate,
     maskChatId,
-    requireTelegramTargetChatId,
+    requireTelegramChatId,
 } from "./config/runtime.js";
 import { fetchGithubFile } from "./github/client.js";
 import {
@@ -255,7 +255,7 @@ export async function handleScheduledSummary(controller, env) {
             config.timezone,
             scheduledDate,
         );
-        const chatId = requireTelegramTargetChatId(config);
+        const chatId = requireTelegramChatId(config);
         const text = buildScheduledQuery(currentDateInfo);
         logInfo("scheduled.received", {
             requestId,

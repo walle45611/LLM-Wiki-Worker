@@ -193,7 +193,7 @@ LLM-Wiki Worker 就是為了解決這個而生。
 - `GITHUB_REPO`
 - `GITHUB_REF`（預設 `main`）
 - `APP_TIMEZONE`（預設 `Asia/Taipei`）
-- `TELEGRAM_TARGET_CHAT_ID`（排程推播目標）
+- `TELEGRAM_CHAT_ID`（排程推播目標）
 - `AI_MODEL`（預設 `@cf/openai/gpt-oss-20b`）
 
 ## Wrangler Config Highlights
@@ -229,7 +229,7 @@ bun run deploy
 - `GITHUB_REPO`
 - `GITHUB_REF`
 - `APP_TIMEZONE`
-- `TELEGRAM_TARGET_CHAT_ID`
+- `TELEGRAM_CHAT_ID`
 - `AI_MODEL`
 
 初始化後可用以下方式快速驗證：
