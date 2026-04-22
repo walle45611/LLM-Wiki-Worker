@@ -77,7 +77,7 @@
 2. 若需要新頁，放在適合的目錄並使用 kebab-case。
 3. 更新 `wiki/index.md`。
 4. 視情況在 `wiki/log.md` 記一筆 query 紀錄。
-5. 若要更新 `wiki/log.md`，新 log 必須附加在檔案尾端，不可插入中間或改寫舊紀錄。
+5. 若要更新 `wiki/log.md`，請依 `wiki/rules/log-rules.md`。
 
 建議 query log 格式：
 

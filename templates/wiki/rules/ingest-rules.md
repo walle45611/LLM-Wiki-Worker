@@ -130,8 +130,8 @@
 
 ## `log.md` 更新規則
 
-`wiki/log.md` 是時間序列紀錄。每次 ingest 都要追加，不覆蓋舊紀錄。
-新 log 必須附加在 `wiki/log.md` 檔案尾端，不可插入中間或改寫舊紀錄。
+`wiki/log.md` 的共通更新方式請依 `wiki/rules/log-rules.md`。
+每次 ingest 都要追加一筆對應紀錄。
 
 建議格式：
 

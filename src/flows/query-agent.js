@@ -10,7 +10,7 @@ import {
 import { extractAiText, extractSummaryReplyFromResult } from "../ai/response.js";
 import { logInfo, logWarn, toJsonPreview, toPreview } from "../logger.js";
 
-const DEFAULT_MAX_TOKENS = 3072;
+const DEFAULT_MAX_TOKENS = 6144;
 const QUERY_AGENT_TIMEOUT_REPLY =
     "目前整理流程逾時，請稍後再試。";
 

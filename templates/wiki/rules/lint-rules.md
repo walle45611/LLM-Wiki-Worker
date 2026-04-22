@@ -97,7 +97,7 @@ Lint 的重點是檢查整體結構與一致性，不是逐字重寫所有頁面
 - 直接修正頁面、索引、連結
 - 一份 lint 結果摘要
 - 一份待補強清單
-- 一筆 `wiki/log.md` 紀錄（若有寫入，必須附加在 `wiki/log.md` 檔案尾端）
+- 一筆 `wiki/log.md` 紀錄（若有寫入，請依 `wiki/rules/log-rules.md`）
 
 建議 lint log 格式：
 

@@ -82,8 +82,8 @@
 在 `wiki/assets/daily/YYYY-MM-DD.md` 成功建立或更新後：
 
 1. 必須同步更新 `wiki/log.md`。
-2. log 必須記錄這次 daily 任務已執行，並指出更新的 daily 檔案路徑與依據來源。
-3. 新 log 必須附加在 `wiki/log.md` 檔案尾端，不可插入中間或改寫舊紀錄。
+2. `wiki/log.md` 的共通更新方式請依 `wiki/rules/log-rules.md`。
+3. log 必須記錄這次 daily 任務已執行，並指出更新的 daily 檔案路徑與依據來源。
 4. 若 daily 檔未成功寫入，禁止先聲稱 log 已完成。
 
 建議 daily log 格式：
