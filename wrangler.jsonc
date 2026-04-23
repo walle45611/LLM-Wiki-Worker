@@ -45,6 +45,6 @@
         "GITHUB_OWNER": "walle4561",
         "GITHUB_REPO": "LLM-Wiki",
         "GITHUB_REF": "main",
-        "AI_MODEL": "@cf/openai/gpt-oss-20b"
+        "AI_MODEL": "@cf/google/gemma-4-26b-a4b-it"
     },
 }

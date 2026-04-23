@@ -11,14 +11,6 @@ export function clampChatText(text) {
     return `${normalized.slice(0, maxLength - 14)}\n\n[內容已截斷]`;
 }
 
-export function escapeTelegramMarkdownV2(text) {
-    return String(text || "").replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, "\\$&");
-}
-
-export function buildTelegramMessage(text) {
-    return escapeTelegramMarkdownV2(clampChatText(text));
-}
-
 export function buildUserErrorMessage(error, currentDateInfo) {
     const message = error instanceof Error ? error.message : String(error);
 

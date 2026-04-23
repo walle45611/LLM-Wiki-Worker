@@ -1,8 +1,8 @@
-## 前置規則
+## IMPORTANT 前置規則 以下規則必須都要讀取
 
 * 【規則 0：輸出規則】每次任務都必須讀取並遵循 `wiki/rules/output-rules.md`，因為任務可能同時包含「寫入檔案」與「回覆使用者」兩種輸出。
 
-* 【規則 1：Log 規則】若本次任務可能更新 `wiki/log.md`，或屬於 Worker、webhook、agent、排程等系統自動執行流程： -> 必須先讀取並遵循 `wiki/rules/log-rules.md`
+* 【規則 1：Log 規則】每次任務都必須讀取並遵循 `wiki/rules/log-rules.md`，並且依照各個任務規則判斷是否需要更新 `wiki/log.md`。
 
 ## 任務規則
 
