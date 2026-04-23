@@ -6,9 +6,11 @@ import {
     buildDateVariants,
     buildUserErrorMessage,
     clampChatText,
+    containsForbiddenMarkdownReply,
     detectReadingLookupDateFromText,
     extractAiText,
     extractSummaryReplyFromResult,
+    extractTelegramBlockPayloadFromResult,
     extractLogForDate,
     extractSummaryReferencesFromLog,
     getCurrentDateInfo,
@@ -31,6 +33,7 @@ import {
     parseToolCallArguments,
 } from "../src/ai/tools.js";
 import { toJsonPreview } from "../src/logger.js";
+import { sendTelegramMessage } from "../src/telegram/client.js";
 
 function encodeGithubContent(text) {
     return Buffer.from(text, "utf8").toString("base64");
@@ -131,6 +134,53 @@ test("requireTelegramWebhookSecret returns configured secret", () => {
         }),
         "expected-secret",
     );
+});
+
+test("sendTelegramMessage falls back to plain text when entities parsing fails", async () => {
+    const requests = [];
+
+    const customFetch = async (input, init = {}) => {
+        requests.push({
+            url: String(input),
+            body: init.body ? JSON.parse(String(init.body)) : null,
+        });
+
+        if (requests.length === 1) {
+            return createJsonResponse(
+                {
+                    ok: false,
+                    error_code: 400,
+                    description:
+                        "Bad Request: can't parse entities: Character '-' is reserved and must be escaped with the preceding '\\'",
+                },
+                400,
+            );
+        }
+
+        return createJsonResponse({
+            ok: true,
+            result: {
+                message_id: 123,
+            },
+        });
+    };
+
+    await sendTelegramMessage(
+        "123456789",
+        {
+            blocks: [{ type: "heading", text: "MicroK8s summary" }],
+        },
+        "telegram-token",
+        { fetch: customFetch },
+    );
+
+    assert.equal(requests.length, 2);
+    assert.match(requests[0].url, /sendMessage$/);
+    assert.equal(requests[0].body.text, "MicroK8s summary");
+    assert.equal(Array.isArray(requests[0].body.entities), true);
+    assert.equal(requests[0].body.entities[0].type, "bold");
+    assert.equal(requests[1].body.text, "MicroK8s summary");
+    assert.equal("entities" in requests[1].body, false);
 });
 
 test("extractLogForDate returns dated section until next heading", () => {
@@ -320,143 +370,21 @@ test("detectReadingLookupDateFromText parses relative date for reading query", (
     assert.equal(isoDate, "2026-04-18");
 });
 
-test(
-    "runQueryAgent forces single-day review to read matched summaries before finishing",
-    { concurrency: false },
-    async () => {
-    const requests = [];
+test("runQueryAgent returns payload with prompt-constrained JSON blocks", async () => {
     const aiRequests = [];
-    const indexContent = [
-        "# Index",
-        "",
-        "## Summaries",
-        "- [alpha](./summaries/alpha.md) · 2026-04-19: Alpha summary",
-    ].join("\n");
-    const summaryContent = [
-        "---",
-        "source link: https://example.com/alpha",
-        "---",
-        "",
-        "Alpha 內容",
-    ].join("\n");
-    let callCount = 0;
-
-    await withMockedFetch(
-        async (url) => {
-            requests.push(String(url));
-            if (String(url).includes("index.md")) {
-                return createJsonResponse({
-                    content: encodeGithubContent(indexContent),
-                });
-            }
-            if (String(url).includes("alpha.md")) {
-                return createJsonResponse({
-                    content: encodeGithubContent(summaryContent),
-                });
-            }
-            return new Response("{}", { status: 404 });
-        },
-        async () => {
-            const reply = await runQueryAgent({
-                userPrompt: "今天閱讀了什麼",
-                aiBinding: {
-                    async run(_model, payload) {
-                        aiRequests.push(payload);
-                        callCount += 1;
-                        if (callCount === 1) {
-                            return {
-                                tool_calls: [
-                                    {
-                                        id: "call-1",
-                                        function: {
-                                            name: "get_file",
-                                            arguments: JSON.stringify({
-                                                path: "wiki/index.md",
-                                            }),
-                                        },
-                                    },
-                                ],
-                            };
-                        }
-                        if (callCount === 2) {
-                            return {
-                                response:
-                                    "這是 2026/04/19 的閱讀摘要：今天讀了 1 篇文章。",
-                            };
-                        }
-                        if (callCount === 3) {
-                            return {
-                                tool_calls: [
-                                    {
-                                        id: "call-2",
-                                        function: {
-                                            name: "get_file",
-                                            arguments: JSON.stringify({
-                                                path: "wiki/summaries/alpha.md",
-                                            }),
-                                        },
-                                    },
-                                ],
-                            };
-                        }
-                        return {
-                            response: [
-                                "📚 2026/04/19 閱讀回顧",
-                                "",
-                                "【閱讀總覽】",
-                                "今天閱讀了 1 篇文章，主題是 Alpha。",
-                                "",
-                                "【逐篇摘要】",
-                                "Alpha",
-                                "source link: https://example.com/alpha",
-                                "核心概念：Alpha 是測試文章。",
-                                "重點：第一點；第二點；第三點。",
-                            ].join("\n"),
-                        };
-                    },
-                },
-                aiModel: "@cf/openai/gpt-oss-20b",
-                config: {
-                    githubOwner: "owner",
-                    githubRepo: "repo",
-                    githubRef: "main",
-                    githubToken: "token",
-                },
-                trace: {},
-                timeoutMs: 5000,
-                currentDateInfo: {
-                    year: 2026,
-                    month: 4,
-                    day: 19,
-                    isoDate: "2026-04-19",
-                    displayDate: "2026/04/19",
-                    weekday: "星期日",
-                    timezone: "Asia/Taipei",
-                },
-            });
-
-            assert.match(reply, /Alpha/);
-            assert.equal(requests.length, 2);
-            assert.equal(aiRequests.length, 4);
-            assert.match(
-                aiRequests[2].messages.at(-1).content,
-                /尚未讀完這一天命中的 summary：wiki\/summaries\/alpha\.md/,
-            );
-        },
-    );
-    },
-);
-
-test("runQueryAgent accepts markdown final replies", async () => {
-    let callCount = 0;
 
     const reply = await runQueryAgent({
-        userPrompt: "幫我整理今天的重點",
+        userPrompt: "今天閱讀了什麼",
         aiBinding: {
-            async run() {
-                callCount += 1;
+            async run(_model, payload) {
+                aiRequests.push(payload);
                 return {
-                    response: "## 標題\n- 第一點\n- 第二點",
+                    response: {
+                        blocks: [
+                            { type: "heading", text: "閱讀回顧" },
+                            { type: "paragraph", text: "今天讀了 1 篇文章。" },
+                        ],
+                    },
                 };
             },
         },
@@ -480,8 +408,76 @@ test("runQueryAgent accepts markdown final replies", async () => {
         },
     });
 
-    assert.match(reply, /## 標題/);
-    assert.equal(callCount, 1);
+    assert.equal(aiRequests.length, 1);
+    assert.equal("response_format" in aiRequests[0], false);
+    assert.equal(reply.blocks.length, 2);
+    assert.equal(reply.blocks[0].type, "heading");
+});
+
+test("runQueryAgent falls back to plain text when payload is invalid", async () => {
+    const reply = await runQueryAgent({
+        userPrompt: "幫我整理今天的重點",
+        aiBinding: {
+            async run() {
+                return {
+                    response: "這是純文字摘要",
+                };
+            },
+        },
+        aiModel: "@cf/openai/gpt-oss-20b",
+        config: {
+            githubOwner: "owner",
+            githubRepo: "repo",
+            githubRef: "main",
+            githubToken: "token",
+        },
+        trace: {},
+        timeoutMs: 5000,
+        currentDateInfo: {
+            year: 2026,
+            month: 4,
+            day: 19,
+            isoDate: "2026-04-19",
+            displayDate: "2026/04/19",
+            weekday: "星期日",
+            timezone: "Asia/Taipei",
+        },
+    });
+
+    assert.equal(reply, "這是純文字摘要");
+});
+
+test("runQueryAgent rejects markdown-styled plain text fallback", async () => {
+    const reply = await runQueryAgent({
+        userPrompt: "幫我整理今天的重點",
+        aiBinding: {
+            async run() {
+                return {
+                    response: "**這是純文字摘要**",
+                };
+            },
+        },
+        aiModel: "@cf/openai/gpt-oss-20b",
+        config: {
+            githubOwner: "owner",
+            githubRepo: "repo",
+            githubRef: "main",
+            githubToken: "token",
+        },
+        trace: {},
+        timeoutMs: 5000,
+        currentDateInfo: {
+            year: 2026,
+            month: 4,
+            day: 19,
+            isoDate: "2026-04-19",
+            displayDate: "2026/04/19",
+            weekday: "星期日",
+            timezone: "Asia/Taipei",
+        },
+    });
+
+    assert.equal(reply, "目前有找到資料，但暫時無法整理成可讀回覆，請稍後再試。");
 });
 
 test("extractAiText supports common Workers AI shapes", () => {
@@ -536,9 +532,39 @@ test("extractSummaryReplyFromResult accepts safe plain text reply", () => {
     assert.match(reply, /閱讀摘要/);
 });
 
+test("containsForbiddenMarkdownReply detects common markdown formatting", () => {
+    assert.equal(containsForbiddenMarkdownReply("**重點**"), true);
+    assert.equal(containsForbiddenMarkdownReply("# 標題"), true);
+    assert.equal(containsForbiddenMarkdownReply("- 清單"), true);
+    assert.equal(containsForbiddenMarkdownReply("這是一般純文字摘要。"), false);
+});
+
+test("extractSummaryReplyFromResult rejects markdown-styled plain text", () => {
+    const reply = extractSummaryReplyFromResult({
+        response: "**這是摘要**",
+    });
+    assert.equal(reply, "");
+});
+
 test("extractSummaryReplyFromResult rejects numeric garbage", () => {
     const reply = extractSummaryReplyFromResult({
         response: "-1.0",
+    });
+    assert.equal(reply, "");
+});
+
+test("extractTelegramBlockPayloadFromResult parses wrapped payload text", () => {
+    const payload = extractTelegramBlockPayloadFromResult({
+        response: 'draft...\n{"blocks":[{"type":"paragraph","text":"摘要"}]}',
+    });
+    assert.equal(payload.blocks.length, 1);
+    assert.equal(payload.blocks[0].type, "paragraph");
+});
+
+test("extractSummaryReplyFromResult rejects JSON-like payload text", () => {
+    const reply = extractSummaryReplyFromResult({
+        response:
+            '{"blocks":[{"type":"paragraph","url":"https://github.com/example/repo/blob/main/wiki/log.md"}]}',
     });
     assert.equal(reply, "");
 });
@@ -746,6 +772,9 @@ test("buildQueryAgentTools includes get_file_tree for query agent discovery", ()
     const tools = buildQueryAgentTools({ enableFileTree: true });
     assert.ok(tools.some((tool) => tool.function?.name === "get_file_tree"));
     assert.ok(tools.some((tool) => tool.function?.name === "get_file"));
+    assert.ok(
+        tools.some((tool) => tool.function?.name === "get_current_date_info"),
+    );
     assert.ok(tools.some((tool) => tool.function?.name === "upsert_file"));
     assert.ok(tools.some((tool) => tool.function?.name === "append_file"));
     assert.ok(tools.some((tool) => tool.function?.name === "replace_in_file"));
@@ -791,6 +820,26 @@ test("executeQueryToolCall returns full file content", async () => {
             assert.equal(result.content, longLog);
         },
     );
+});
+
+test("executeQueryToolCall returns current date info", async () => {
+    const result = await executeQueryToolCall("get_current_date_info", {}, {
+        currentDateInfo: {
+            timezone: "Asia/Taipei",
+            displayDate: "2026/04/23",
+            weekday: "星期四",
+            isoDate: "2026-04-23",
+        },
+        trace: {},
+        logInfo: () => {},
+    });
+
+    assert.deepEqual(result, {
+        timezone: "Asia/Taipei",
+        displayDate: "2026/04/23",
+        weekday: "星期四",
+        isoDate: "2026-04-23",
+    });
 });
 
 test("executeQueryToolCall keeps full content for wiki/rules markdown", async () => {

@@ -339,5 +339,10 @@ function decodeGithubContent(content, encoding = "base64") {
 }
 
 function encodeGithubContent(content) {
-    return btoa(unescape(encodeURIComponent(String(content || ""))));
+    const bytes = new TextEncoder().encode(String(content || ""));
+    let binary = "";
+    for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+    }
+    return btoa(binary);
 }

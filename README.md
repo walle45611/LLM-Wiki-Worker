@@ -136,7 +136,9 @@ LLM-Wiki Worker 就是為了解決這個而生。
 
 - `output-rules.md`
   - 專門管「輸出格式」
-  - 明確區分：寫入檔案可用 Markdown、回覆使用者必須純文字（預設 zh-TW）
+  - 明確區分：寫入檔案可用 Markdown、回覆使用者必須走結構化輸出規則
+  - 若任務要求以 JSON 回覆，最終只能輸出合法的 `{"blocks":[...]}` payload
+  - 明確禁止把 `**文字**`、`__文字__`、`# 標題`、Markdown 清單、code fence 直接塞進最終回覆
 
 - `ingest-rules.md`
   - 新知攝取流程（整理/摘要/歸檔）
@@ -172,9 +174,29 @@ LLM-Wiki Worker 就是為了解決這個而生。
 
 ## Telegram Output Safety
 
-送給 Telegram 前會做長度保護：
+送給 Telegram 前目前有三層保護：
 
-1. `clampChatText`：超過 3500 字會截斷並補上 `[內容已截斷]`
+1. `blocks` payload 驗證
+   - Query Agent 的理想輸出是合法 `{"blocks":[...]}` JSON
+   - 只有通過 schema 驗證的 block payload 才會走 Telegram rich entities 渲染
+2. plain-text fallback 審核
+   - 如果模型沒有回合法 block payload，Worker 會嘗試退回純文字
+   - 但若 fallback 文字仍含 `**粗體**`、`__底線__`、`# heading`、Markdown 清單、code fence，會直接拒收，不再原文送出
+3. 長度保護
+   - `clampChatText`：超過 3500 字會截斷並補上 `[內容已截斷]`
+
+### Telegram Reply Shape
+
+目前 Worker 允許兩種最終回覆形態：
+
+1. 結構化 `blocks` payload
+   - 會轉成 Telegram entities
+   - 支援的 block type：`heading`、`paragraph`、`bullet_list`、`quote`、`code_block`、`link`
+2. 純文字 fallback
+   - 只在 schema 不符時使用
+   - 會再經過 Markdown 違規檢查，不符合格式就改回固定錯誤訊息
+
+這個設計的目的不是讓模型自由輸出 Markdown，而是把「格式責任」收斂到 rule + schema + runtime guard 三層，避免模型一時輸出 `****` 就直接污染 Telegram 回覆。
 
 ## Runtime Config
 

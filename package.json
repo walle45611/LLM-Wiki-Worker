@@ -9,16 +9,18 @@
         "deploy": "wrangler deploy"
     },
     "dependencies": {
+        "@grammyjs/parse-mode": "^2.3.0",
         "grammy": "^1.42.0",
-        "hono": "^4.8.3",
-        "octokit": "^5.0.5"
+        "hono": "^4.12.14",
+        "octokit": "^5.0.5",
+        "zod": "^4.3.6"
     },
     "devDependencies": {
-        "@cloudflare/workers-types": "^4.20260317.1",
-        "@types/node": "^25.5.0",
+        "@cloudflare/workers-types": "^4.20260422.1",
+        "@types/node": "^25.6.0",
         "node-addon-api": "^8.7.0",
-        "node-gyp": "^12.2.0",
-        "typescript": "^6.0.2",
-        "wrangler": "^4.83.0"
+        "node-gyp": "^12.3.0",
+        "typescript": "^6.0.3",
+        "wrangler": "^4.84.1"
     }
 }

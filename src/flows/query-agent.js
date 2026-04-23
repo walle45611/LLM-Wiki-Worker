@@ -8,21 +8,16 @@ import {
     parseToolCallArguments,
 } from "../ai/tools.js";
 import {
+    containsForbiddenMarkdownReply,
     extractAiText,
+    extractTelegramBlockPayloadFromResult,
     extractSummaryReplyFromResult,
 } from "../ai/response.js";
-import {
-    buildDateInfoFromIsoDate,
-    detectReadingLookupDateFromText,
-} from "../date.js";
-import {
-    getCompletionRejectionReason,
-    rememberSuccessfulFileRead,
-} from "./query-agent-guard.js";
 import { logInfo, logWarn, toJsonPreview, toPreview } from "../logger.js";
 
-const DEFAULT_MAX_TOKENS = 4096;
+const DEFAULT_MAX_TOKENS = 6144;
 const QUERY_AGENT_TIMEOUT_REPLY = "目前整理流程逾時，請稍後再試。";
+const QUERY_AGENT_EMPTY_REPLY = "目前有找到資料，但暫時無法整理成可讀回覆，請稍後再試。";
 
 export async function runQueryAgent({
     userPrompt,
@@ -35,24 +30,13 @@ export async function runQueryAgent({
 }) {
     assertAiBindingConfigured(aiBinding);
     const tools = buildQueryAgentTools({ enableFileTree: true });
-    const singleDateReviewIsoDate = detectReadingLookupDateFromText(
-        userPrompt,
-        currentDateInfo,
-    );
-    const singleDateReviewInfo = singleDateReviewIsoDate
-        ? buildDateInfoFromIsoDate(
-              singleDateReviewIsoDate,
-              currentDateInfo?.timezone || "Asia/Taipei",
-          )
-        : null;
     const systemPrompt = `
 啟動規則：
-1. 收到任務後，使用 get_file 先讀 AGENTS.md
+1. 收到任務後，先使用 get_current_date_info 取得今天日期資訊
 2. 這次任務要協助使用者處理 wiki 相關問題，並且遵守 rules 中的規定。
-3. 再依 AGENTS.md 的要求，先讀 wiki/rules/router-rules.md 與必要 rules
-時間資訊：
-- 今天日期（${currentDateInfo?.timezone || "Asia/Taipei"}）：${currentDateInfo?.displayDate || ""} ${currentDateInfo?.weekday || ""}
-- ISO 日期：${currentDateInfo?.isoDate || ""}
+3. 再使用 get_file 讀 AGENTS.md
+4. 再依 AGENTS.md 的要求，先讀 wiki/rules/router-rules.md 與必要 rules
+5. 最終輸出前請先閱讀 wiki/rules/output-rules.md，並且這次輸出使用 JSON 回覆給使用者。
 `.trim();
     const messages = [
         {
@@ -67,6 +51,7 @@ export async function runQueryAgent({
 
     const toolExecutionContext = {
         config,
+        currentDateInfo,
         trace,
         logInfo,
     };
@@ -74,9 +59,7 @@ export async function runQueryAgent({
     const startedAt = Date.now();
     const deadlineMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 60000;
     let conversation = [...messages];
-    const successfulFileReads = new Map();
-    const toolFailures = [];
-    const maxRounds = 50;
+    const maxRounds = 100;
     logInfo("ai.query_agent_started", {
         requestId: trace.requestId,
         eventIndex: trace.eventIndex,
@@ -165,48 +148,50 @@ export async function runQueryAgent({
             elapsedMs: Date.now() - startedAt,
         });
         if (toolCalls.length === 0) {
-            const reply = extractQueryAgentReply(result);
-            if (!reply) {
+            const payload = extractTelegramBlockPayloadFromResult(result);
+            if (payload) {
+                logInfo("ai.query_agent_completed", {
+                    requestId: trace.requestId,
+                    eventIndex: trace.eventIndex,
+                    blockCount: payload.blocks.length,
+                    preview: toPreview(JSON.stringify(payload)),
+                    rounds: round + 1,
+                    elapsedMs: Date.now() - startedAt,
+                });
+                logInfo("ai.query_agent_loop_ended", {
+                    requestId: trace.requestId,
+                    eventIndex: trace.eventIndex,
+                    reason: "completed",
+                    round: round + 1,
+                    elapsedMs: Date.now() - startedAt,
+                });
+                return payload;
+            }
+            const fallbackReply = extractQueryAgentReply(result);
+            if (!fallbackReply) {
                 logWarn("ai.query_agent_empty_output", {
                     requestId: trace.requestId,
                     eventIndex: trace.eventIndex,
                     outputRawPreview: toJsonPreview(result),
                     elapsedMs: Date.now() - startedAt,
                 });
-                return "目前有找到資料，但暫時無法整理成可讀回覆，請稍後再試。";
+                return QUERY_AGENT_EMPTY_REPLY;
             }
-            const rejectionReason = getCompletionRejectionReason({
-                reply,
-                singleDateReviewInfo,
-                successfulFileReads,
-                toolFailures,
-            });
-            if (rejectionReason) {
-                conversation = [
-                    ...conversation,
-                    {
-                        role: "assistant",
-                        content: reply,
-                    },
-                    {
-                        role: "user",
-                        content: rejectionReason,
-                    },
-                ];
-                logWarn("ai.query_agent_completion_rejected", {
+            if (containsForbiddenMarkdownReply(fallbackReply)) {
+                logWarn("ai.query_agent_rejected_plain_text_fallback", {
                     requestId: trace.requestId,
                     eventIndex: trace.eventIndex,
-                    round: round + 1,
-                    reasonPreview: toPreview(rejectionReason),
+                    preview: toPreview(fallbackReply),
                     elapsedMs: Date.now() - startedAt,
                 });
-                continue;
+                return QUERY_AGENT_EMPTY_REPLY;
             }
             logInfo("ai.query_agent_completed", {
                 requestId: trace.requestId,
                 eventIndex: trace.eventIndex,
-                length: reply.length,
-                preview: toPreview(reply),
+                length: fallbackReply.length,
+                preview: toPreview(fallbackReply),
+                schemaRejected: true,
                 rounds: round + 1,
                 elapsedMs: Date.now() - startedAt,
             });
@@ -217,7 +202,7 @@ export async function runQueryAgent({
                 round: round + 1,
                 elapsedMs: Date.now() - startedAt,
             });
-            return reply;
+            return fallbackReply;
         }
 
         const toolMessages = [];
@@ -268,13 +253,6 @@ export async function runQueryAgent({
                     guidance:
                         "If the path may be missing .md or the filename may differ, try get_file again with .md or inspect the nearest parent directory with get_file_tree instead of scanning root.",
                 };
-                toolFailures.push({
-                    round: round + 1,
-                    name,
-                    args,
-                    error:
-                        error instanceof Error ? error.message : String(error),
-                });
             }
             logInfo("ai.query_agent_tool_call_completed", {
                 requestId: trace.requestId,
@@ -283,13 +261,6 @@ export async function runQueryAgent({
                 name,
                 resultPreview: toJsonPreview(toolResult),
             });
-            if (
-                name === "get_file" &&
-                toolResult &&
-                typeof toolResult === "object"
-            ) {
-                rememberSuccessfulFileRead(successfulFileReads, toolResult);
-            }
             toolMessages.push({
                 role: "tool",
                 tool_call_id: id,

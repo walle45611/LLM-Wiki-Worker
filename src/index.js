@@ -1,5 +1,10 @@
 import { Hono } from "hono";
-import { extractAiText, extractSummaryReplyFromResult } from "./ai/response.js";
+import {
+    containsForbiddenMarkdownReply,
+    extractAiText,
+    extractSummaryReplyFromResult,
+    extractTelegramBlockPayloadFromResult,
+} from "./ai/response.js";
 import {
     buildDateInfoFromIsoDate,
     detectReadingLookupDateFromText,
@@ -32,7 +37,13 @@ import {
     sendTelegramMessage,
 } from "./telegram/client.js";
 
-export { extractAiText, extractSummaryReplyFromResult, fetchGithubFile };
+export {
+    containsForbiddenMarkdownReply,
+    extractAiText,
+    extractSummaryReplyFromResult,
+    extractTelegramBlockPayloadFromResult,
+    fetchGithubFile,
+};
 export {
     buildDateInfoFromIsoDate,
     buildDateVariants,
@@ -179,12 +190,21 @@ export async function handleQueryQueue(batch, env) {
                 timeoutMs: config.eventTimeoutMs,
                 currentDateInfo,
             });
-            const reply = clampChatText(rawReply);
+            const reply =
+                typeof rawReply === "string"
+                    ? clampChatText(rawReply)
+                    : String(rawReply.blocks?.length || 0);
             logInfo(`${eventPrefix}.summary_generated`, {
                 requestId: trace.requestId,
                 eventIndex: trace.eventIndex,
-                summaryLength: rawReply.length,
-                summaryPreview: toPreview(rawReply),
+                summaryLength:
+                    typeof rawReply === "string"
+                        ? rawReply.length
+                        : JSON.stringify(rawReply).length,
+                summaryPreview:
+                    typeof rawReply === "string"
+                        ? toPreview(rawReply)
+                        : toPreview(JSON.stringify(rawReply)),
                 replyLength: reply.length,
                 totalElapsedMs: Date.now() - startedAt,
                 currentDate: currentDateInfo.isoDate,
@@ -192,7 +212,7 @@ export async function handleQueryQueue(batch, env) {
 
             await sendTelegramMessage(
                 chatId,
-                reply,
+                rawReply,
                 config.telegramBotToken,
             );
             logInfo(
