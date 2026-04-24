@@ -120,7 +120,8 @@
 	2. 不要輸出其他欄位。  
 	3. 不要輸出表格。  
 	4. 不要輸出 Markdown 語法。
-	5. 明確禁止直接輸出這些形式：
+	5. 若需要顯示檔名、指令、程式碼或短片段，請優先改用 `code_block`；不要使用 inline code 或把反引號寫進最終回覆。
+	6. 明確禁止直接輸出這些形式：
 		- `**文字**`
 		- `__文字__`
 		- `# 標題`
@@ -128,14 +129,14 @@
 		- `- 清單`
 		- `1. 清單`
 		- `````code fence`````
-	6. 即使內容需要粗體、標題、清單、引用，也只能改用對應的 JSON block 表達，不可直接把 Markdown 符號寫進最終回覆。
-	7. 輸出前必須逐項自我檢查：若最終文字中仍出現 `**`、`__`、heading、Markdown 清單、code fence，代表格式不合規，必須重寫。
-	8. 若內容是網址，請使用 link block，不要使用 paragraph block。
-	9. 若內容原本是清單，請改放入 bullet_list.items。  
-	10. 若有原始連結，請使用 link block。  
-	11. 若有檔名、指令或程式碼，請視情況放入 paragraph 或 code_block。  
-	12. 請輸出合法 JSON。
-	13. 請只輸出符合 schema 的 JSON。
+	7. 即使內容需要粗體、標題、清單、引用，也只能改用對應的 JSON block 表達，不可直接把 Markdown 符號寫進最終回覆。
+	8. 輸出前必須逐項自我檢查：若最終文字中仍出現 `**`、`__`、heading、Markdown 清單、code fence 或 inline code，代表格式不合規，必須重寫。
+	9. 若內容是網址，請使用 link block，不要使用 paragraph block。
+	10. 若內容原本是清單，請改放入 bullet_list.items。  
+	11. 若有原始連結，請使用 link block。  
+	12. 若有檔名、指令或程式碼，請放入 code_block。  
+	13. 請輸出合法 JSON。
+	14. 請只輸出符合 schema 的 JSON。
 ## 3. 同時有寫檔與回覆時
 
 若同一次任務同時包含「修改檔案」與「回覆使用者」，則：
