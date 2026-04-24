@@ -15,8 +15,10 @@ import {
 } from "../ai/response.js";
 import { logInfo, logWarn, toJsonPreview, toPreview } from "../logger.js";
 
-const DEFAULT_MAX_TOKENS = 6144;
+const DEFAULT_MAX_TOKENS = 4096;
 const QUERY_AGENT_TIMEOUT_REPLY = "目前整理流程逾時，請稍後再試。";
+const QUERY_AGENT_KNOWLEDGE_TIMEOUT_REPLY =
+    "目前讀取知識庫逾時，請稍後再試。";
 const QUERY_AGENT_EMPTY_REPLY = "目前有找到資料，但暫時無法整理成可讀回覆，請稍後再試。";
 
 export async function runQueryAgent({
@@ -74,7 +76,14 @@ export async function runQueryAgent({
         const elapsedMs = Date.now() - startedAt;
         const remainingMs = deadlineMs - elapsedMs;
         if (remainingMs <= 0) {
-            throw new Error("Workers AI query agent timed out");
+            logInfo("ai.query_agent_loop_ended", {
+                requestId: trace.requestId,
+                eventIndex: trace.eventIndex,
+                reason: "deadline_exceeded",
+                round: round + 1,
+                elapsedMs: Date.now() - startedAt,
+            });
+            return QUERY_AGENT_TIMEOUT_REPLY;
         }
 
         logInfo("ai.query_agent_request", {
@@ -118,7 +127,7 @@ export async function runQueryAgent({
                     round: round + 1,
                     elapsedMs: Date.now() - startedAt,
                 });
-                return QUERY_AGENT_TIMEOUT_REPLY;
+                return getTimeoutReplyForError(error);
             }
             logWarn("ai.query_agent_loop_ended", {
                 requestId: trace.requestId,
@@ -245,7 +254,7 @@ export async function runQueryAgent({
                         error instanceof Error ? error.message : String(error),
                 });
                 if (isTimeoutLikeError(error)) {
-                    return QUERY_AGENT_TIMEOUT_REPLY;
+                    return getTimeoutReplyForError(error);
                 }
                 toolResult = {
                     error:
@@ -325,4 +334,16 @@ async function runAiWithTimeout(promise, timeoutMs, timeoutMessage) {
 function isTimeoutLikeError(error) {
     const message = error instanceof Error ? error.message : String(error);
     return /timed out|timeout|AbortError/i.test(message);
+}
+
+function getTimeoutReplyForError(error) {
+    if (isGithubTimeoutLikeError(error)) {
+        return QUERY_AGENT_KNOWLEDGE_TIMEOUT_REPLY;
+    }
+    return QUERY_AGENT_TIMEOUT_REPLY;
+}
+
+function isGithubTimeoutLikeError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return /GitHub fetch timed out|GitHub tree walk timed out/i.test(message);
 }

@@ -31,8 +31,19 @@ export function getRuntimeConfig(env) {
         telegramBotToken: env.TELEGRAM_BOT_TOKEN,
         telegramChatId: env.TELEGRAM_CHAT_ID || "",
         aiModel: env.AI_MODEL || DEFAULT_AI_MODEL,
-        eventTimeoutMs: EVENT_TIMEOUT_MS,
+        eventTimeoutMs: parsePositiveIntegerEnv(
+            env.EVENT_TIMEOUT_MS,
+            EVENT_TIMEOUT_MS,
+        ),
     };
+}
+
+function parsePositiveIntegerEnv(value, fallback) {
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+        return fallback;
+    }
+    return parsed;
 }
 
 export function requireTelegramChatId(config) {
