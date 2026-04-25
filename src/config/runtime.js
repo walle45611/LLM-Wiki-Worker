@@ -5,7 +5,7 @@ export const TELEGRAM_WEBHOOK_SECRET_HEADER =
     "x-telegram-bot-api-secret-token";
 
 export function buildScheduledQuery(_currentDateInfo) {
-    return "排程任務需要把當天整理結果寫入知識庫";
+    return "執行 daily rules";
 }
 
 export function getRuntimeConfig(env) {
