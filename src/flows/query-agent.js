@@ -34,7 +34,7 @@ export async function runQueryAgent({
     const tools = buildQueryAgentTools({ enableFileTree: true });
     const systemPrompt = `
 啟動規則：
-1. 收到任務後，先使用 get_current_date_info 取得今天日期資訊
+1. 收到任務後，先使用 get_now 取得今天日期資訊
 2. 這次任務要協助使用者處理 wiki 相關問題，並且遵守 rules 中的規定。
 3. 再使用 get_file 讀 AGENTS.md
 4. 再依 AGENTS.md 的要求，先讀 wiki/rules/router-rules.md 與必要 rules

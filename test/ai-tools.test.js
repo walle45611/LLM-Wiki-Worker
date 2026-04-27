@@ -20,9 +20,7 @@ test("buildQueryAgentTools includes get_file_tree for query agent discovery", ()
     const tools = buildQueryAgentTools({ enableFileTree: true });
     assert.ok(tools.some((tool) => tool.function?.name === "get_file_tree"));
     assert.ok(tools.some((tool) => tool.function?.name === "get_file"));
-    assert.ok(
-        tools.some((tool) => tool.function?.name === "get_current_date_info"),
-    );
+    assert.ok(tools.some((tool) => tool.function?.name === "get_now"));
     assert.ok(tools.some((tool) => tool.function?.name === "upsert_file"));
     assert.ok(tools.some((tool) => tool.function?.name === "append_file"));
     assert.ok(tools.some((tool) => tool.function?.name === "replace_in_file"));
@@ -63,7 +61,7 @@ test("executeQueryToolCall returns full file content", async () => {
 
 test("executeQueryToolCall returns current date info", async () => {
     const result = await executeQueryToolCall(
-        "get_current_date_info",
+        "get_now",
         {},
         createToolContext({
             currentDateInfo: {
@@ -81,6 +79,23 @@ test("executeQueryToolCall returns current date info", async () => {
         weekday: "星期四",
         isoDate: "2026-04-23",
     });
+});
+
+test("executeQueryToolCall keeps get_current_date_info compatibility", async () => {
+    const result = await executeQueryToolCall(
+        "get_current_date_info",
+        {},
+        createToolContext({
+            currentDateInfo: {
+                timezone: "Asia/Taipei",
+                displayDate: "2026/04/23",
+                weekday: "星期四",
+                isoDate: "2026-04-23",
+            },
+        }),
+    );
+
+    assert.deepEqual(result.isoDate, "2026-04-23");
 });
 
 test("executeQueryToolCall keeps full content for wiki/rules markdown", async () => {

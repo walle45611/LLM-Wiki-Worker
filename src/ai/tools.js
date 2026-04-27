@@ -6,6 +6,7 @@ import {
 import { toJsonPreview } from "../logger.js";
 const TOOL_GET_FILE_TREE = "get_file_tree";
 const TOOL_GET_FILE = "get_file";
+const TOOL_GET_NOW = "get_now";
 const TOOL_GET_CURRENT_DATE_INFO = "get_current_date_info";
 const TOOL_UPSERT_FILE = "upsert_file";
 const TOOL_APPEND_FILE = "append_file";
@@ -51,7 +52,7 @@ export function buildQueryAgentTools(options = {}) {
     tools.push({
         type: "function",
         function: {
-            name: TOOL_GET_CURRENT_DATE_INFO,
+            name: TOOL_GET_NOW,
             description:
                 "取得目前任務所使用的今天日期資訊，包含 timezone、displayDate、weekday、isoDate。當任務涉及今天、昨天、相對日期或需要確認今天是哪一天時，先呼叫這個工具，不要自行猜測。",
             parameters: {
@@ -185,8 +186,8 @@ export async function executeQueryToolCall(name, args, context) {
     if (name === TOOL_GET_FILE) {
         return getFileTool(args, context);
     }
-    if (name === TOOL_GET_CURRENT_DATE_INFO) {
-        return getCurrentDateInfoTool(context);
+    if (name === TOOL_GET_NOW || name === TOOL_GET_CURRENT_DATE_INFO) {
+        return getCurrentDateInfoTool(context, name);
     }
     if (name === TOOL_UPSERT_FILE) {
         return upsertFileTool(args, context);
@@ -200,18 +201,23 @@ export async function executeQueryToolCall(name, args, context) {
     throw new Error(`Unsupported query tool call: ${name}`);
 }
 
-function getCurrentDateInfoTool({ currentDateInfo, trace, logInfo }) {
+function getCurrentDateInfoTool({ currentDateInfo, trace, logInfo }, toolName) {
     const result = {
         timezone: currentDateInfo?.timezone || "Asia/Taipei",
         displayDate: currentDateInfo?.displayDate || "",
         weekday: currentDateInfo?.weekday || "",
         isoDate: currentDateInfo?.isoDate || "",
     };
-    logInfo("tool.get_current_date_info_completed", {
-        requestId: trace.requestId,
-        eventIndex: trace.eventIndex,
-        resultPreview: toJsonPreview(result),
-    });
+    logInfo(
+        toolName === TOOL_GET_NOW
+            ? "tool.get_now_completed"
+            : "tool.get_current_date_info_completed",
+        {
+            requestId: trace.requestId,
+            eventIndex: trace.eventIndex,
+            resultPreview: toJsonPreview(result),
+        },
+    );
     return result;
 }
 
