@@ -80,7 +80,7 @@ test("handleScheduledSummary enqueues scheduled summary job", async () => {
     assert.equal(queuedJobs.length, 1);
     assert.equal(queuedJobs[0].type, "scheduled_summary");
     assert.equal(queuedJobs[0].chatId, "123456789");
-    assert.equal(queuedJobs[0].text, "排程任務需要把當天整理結果寫入知識庫");
+    assert.equal(queuedJobs[0].text, "執行今天的 daily rules");
 });
 
 test("handleScheduledSummary throws when queue enqueue fails", async () => {

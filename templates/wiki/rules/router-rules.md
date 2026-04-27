@@ -14,6 +14,6 @@
 
 * 【任務 E：歷史回顧】當人類透過通訊軟體或介面詢問「今天/昨天讀了什麼」、「某月某日整理了什麼」等時間回顧型問題時： -> 請務必先讀取並遵循 `wiki/rules/review-rules.md` 的指示；若該流程由 Worker、webhook、agent 或排程執行，亦必須同時遵循 `wiki/rules/log-rules.md`
 
-* 【任務 F：每日整理】當人類透過通訊軟體或介面詢問「使用者要求建立 daily」、「排程任務需要把當天整理結果寫入知識庫」等問題時： -> 請務必先讀取並遵循 `wiki/rules/daily-rules.md` 的指示。
+* 【任務 F：每日整理】當人類透過通訊軟體或介面詢問「使用者要求建立 daily」、「執行今天的 daily rules」等問題時： -> 請務必先讀取並遵循 `wiki/rules/daily-rules.md` 的指示。
 
 * 【任務 G：社群貼文整理】當人類提到某篇文章，並要求「整理成社群貼文」、「可發送的推文」、「幫我發送推文」、「發送貼文」、「貼到社群」、「貼到 X / Twitter」等字眼時： -> 請務必先讀取並遵循 `wiki/rules/social-post-rules.md` 的指示。
